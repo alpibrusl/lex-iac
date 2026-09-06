@@ -112,6 +112,14 @@ not run. The 8-versus-2 distinction is load-bearing — a refusal is a
 decision, not a malfunction, and a pipeline that conflates them will
 eventually read a broken gate as an approval.
 
+Which is also why **a document that is not a plan is exit 2, never exit
+0**. `{"resource_changes": []}` is an empty plan and there is nothing in
+it to authorise; a document that merely *omits* `resource_changes` is a
+failed `terraform show -json`, a truncated redirect, or another tool's
+output, and the gate will not approve what it cannot read. A row with no
+`actions` is the same rule one level down: it classifies as unknown, not
+as a no-op.
+
 ## Where this is
 
 **Milestones 1–3 of [#1](https://github.com/alpibrusl/lex-iac/issues/1).**

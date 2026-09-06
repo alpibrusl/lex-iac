@@ -400,3 +400,60 @@ fn a_zero_delta_estimate_is_an_estimate() {
         "Some(0) is priced at zero; None is unpriced. They are not the same."
     );
 }
+
+/// The hole this suite did not have: six shapes that are JSON but are
+/// not a plan the gate can vouch for, each of which used to be
+/// **ACCEPTED with exit 0**.
+///
+/// The realistic case is mundane. `terraform show -json` fails, the
+/// redirect leaves a short file, the pipeline runs the gate on it, and
+/// a gate that read absence as emptiness answers "approved". Exit 2 —
+/// the gate could not run — is the honest answer, and is why 8 and 2
+/// are kept apart.
+#[test]
+fn a_document_that_is_not_a_plan_stops_the_gate_rather_than_passing_it() {
+    let m = manifest("grant_ecs_only.json");
+    for not_a_plan in [
+        r#"{}"#,
+        r#"[]"#,
+        r#"{"format_version":"1.2","errored":true}"#,
+        r#"{"Resources":{"db":{"Type":"AWS::RDS::DBInstance"}}}"#,
+        "",
+    ] {
+        let err = check(not_a_plan, &m, None).unwrap_err();
+        assert!(
+            matches!(err, lex_iac::GateError::Plan(_)),
+            "{not_a_plan} must refuse to run, not approve: got {err}"
+        );
+    }
+
+    // ...while an explicitly empty plan is a real answer: there is
+    // nothing in it to authorise.
+    let d = check(r#"{"resource_changes":[]}"#, &m, None).unwrap();
+    assert!(d.verdict.allowed());
+    assert_eq!(d.exit_code(), 0);
+}
+
+/// A row that does not say what it does is checked, not skipped. It
+/// used to compile to a no-op, which meant `mutates()` was false and no
+/// wall ever saw it.
+#[test]
+fn a_row_with_no_actions_is_checked_not_skipped() {
+    let plan = r#"{"resource_changes":[
+        {"address":"module.data.aws_db_instance.payments","type":"aws_db_instance",
+         "mode":"managed","change":{}}
+    ]}"#;
+
+    // Under a grant that is generous by any reading.
+    let mut m = manifest("grant_ecs_only.json");
+    let mut infra = lex_iac::infra_facet(&m).unwrap();
+    infra.allow = vec!["aws.rds.*".into(), "aws.ecs.*".into()];
+    m = m.with_facet(&infra).unwrap();
+
+    let d = check(plan, &m, None).unwrap();
+    let Verdict::Deny { first, .. } = &d.verdict else {
+        panic!("expected a refusal, got {:?}", d.verdict);
+    };
+    assert_eq!(first.effect, "aws.rds.unknown");
+    assert_eq!(d.exit_code(), 8);
+}
