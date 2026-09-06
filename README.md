@@ -30,6 +30,10 @@ cargo run -- check --grant tests/fixtures/grant_with_rds_wildcard.json \
 ```
 
 ```
+goal:      manage the payments stack
+plan:      sha256:2e788cc61dd7…
+grant:     manifest:81540195a8cf
+
 REFUSED — 1 effect(s) outside the grant:
 
   aws.rds.replace  [reversibility]
@@ -42,7 +46,7 @@ the grant allows:
   aws.cloudwatch.*
   aws.rds.*
 
-audit: 2 entries, head sha256:d8a89c1d…
+audit: 2 entries, head sha256:6d27aa34…
 ```
 
 That plan reads as a routine tagging change. Two of its three resources
@@ -76,6 +80,7 @@ On your own plan:
 terraform plan -out=p.tfplan && terraform show -json p.tfplan > plan.json
 cargo run -- check --grant env.json --plan plan.json     # exit 0 or 8
 cargo run --example compile_plan -- plan.json            # just the effect rows
+cargo run --example one_manifest                         # the manifest, end to end
 ```
 
 Exit codes follow lex-os: `0` allowed, `8` refused, `2` the gate could
@@ -89,6 +94,11 @@ eventually read a broken gate as an approval.
 The plan compiles to effect rows ([#2](https://github.com/alpibrusl/lex-iac/issues/2))
 and the gate checks them against a grant, refusing what it does not
 cover ([#3](https://github.com/alpibrusl/lex-iac/issues/3)).
+
+A grant file is a `lex_os_manifest::Manifest` — one manifest, one
+`ManifestId`, one narrowing wall, with `infra` as a facet on it. That
+was the acceptance test for
+[lex-os#71](https://github.com/alpibrusl/lex-os/issues/71).
 
 Not yet here: budget ([#4](https://github.com/alpibrusl/lex-iac/issues/4)),
 attestation, and running the apply itself inside a perimeter.
@@ -133,23 +143,36 @@ escalate can do so explicitly. See `src/classify.rs`.
 
 ## The grant manifest
 
+A grant file **is** a `lex_os_manifest::Manifest` — the same JSON
+`lex-os run` takes — carrying one extra facet:
+
 ```json
 {
-  "goal": "rotate the payments API deployment",
+  "goal": { "description": "rotate the payments API deployment" },
   "grant":  { "filesystem": "ReadOnly", "network": "Allowlist", "exec": "None" },
   "budget": { "wall_clock_secs": 900, "max_commands": 50,
               "max_money_cents": 5000, "max_api_calls": 200 },
-  "infra": {
-    "allow": ["aws.ecs.*", "aws.cloudwatch.*", "aws.iam.read"],
-    "scope": { "account": "123456789012", "region": ["eu-west-1"] }
+  "isolation_floor": "Namespace",
+  "facets": {
+    "infra": {
+      "allow": ["aws.ecs.*", "aws.cloudwatch.*", "aws.iam.read"],
+      "scope": { "account": "123456789012", "region": ["eu-west-1"] }
+    }
   }
 }
 ```
 
-`grant` and `budget` are lex-os's own types, not restatements. `infra`
-is a **facet** — an authority domain outside the trust lattice — and it
-implements lex-os's `Facet` trait, narrowing through that crate's
-lattice primitives.
+Nothing above is this crate's own type. `goal`, `grant`, `budget` and
+`isolation_floor` are lex-os's; `infra` is a **facet** — an authority
+domain outside the trust lattice — and it sits in lex-os's own
+type-erased facet slot, narrowed through that crate's lattice
+primitives. What lex-iac contributes is the *rule* for its domain and
+the `FacetRegistry` that hands that rule to lex-os. There is one
+manifest type, one `ManifestId`, one narrowing wall.
+
+```sh
+cargo run --example one_manifest
+```
 
 **Allow-only, no deny list.** A deny list does not narrow: a child that
 omits one of its parent's deny entries has *widened*, which inverts the
@@ -161,6 +184,12 @@ An allow entry is exactly three segments, `provider.service.verb`, each
 a literal or `*`. Two-segment entries like `aws.*` are rejected and warn
 loudly rather than being interpreted: a grant whose breadth depends on
 how a reader parses it is worse than no grant.
+
+A manifest carrying **no** `infra` facet authorises no infrastructure
+change at all — every mutating row is refused, and the refusal is
+recorded like any other. A facet that is present but *unreadable* is
+different: the gate exits 2 rather than guessing, because neither
+"grants nothing" nor "grants everything" is a safe reading of it.
 
 ## The two walls
 
@@ -196,12 +225,13 @@ downstream gate would not reimplement tamper-evidence.
    `aws_db_instance`. A grant nobody would think to write is a grant
    written too broadly, so a short alias map fixes the genuine
    mismatches. It will need extending.
-4. **`InfraManifest` should be `lex_os_manifest::Manifest`.** lex-os
-   ships the `Facet` trait and the narrowing primitives but has no open
-   slot on `Manifest` for a facet it does not itself know about, so this
-   repo carries a parallel manifest shape. Tracked by
-   [lex-os#71](https://github.com/alpibrusl/lex-os/issues/71); collapsing
-   the two is that issue's acceptance test.
+4. **Narrowing a facet is subsumption; admitting an effect is not.** A
+   parent granting `aws.rds.*` does let a child inherit
+   `aws.rds.delete` — the child is genuinely no wider than its parent.
+   Neither manifest thereby authorises destroying a database: that is
+   the reversibility wall, asked separately. Two questions that read
+   alike and are not the same, and the distinction is load-bearing
+   enough to be worth stating rather than discovering.
 
 ## Develop
 

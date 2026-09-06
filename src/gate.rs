@@ -22,10 +22,12 @@
 //! comment.
 
 use lex_os_audit::{Chain, ChainPayload};
-use lex_os_manifest::Reversibility;
+use lex_os_manifest::{Manifest, ManifestError, Reversibility};
 use serde::{Deserialize, Serialize};
 
-use crate::{compile_str, CompiledPlan, Denial, EffectRow, InfraManifest, PlanError};
+use crate::{
+    compile_str, manifest::infra_facet, CompiledPlan, Denial, EffectRow, InfraFacet, PlanError,
+};
 
 /// What this gate records. lex-os knows nothing about any of it — which
 /// is why `Chain<E>` is generic (lex-os#67).
@@ -57,6 +59,26 @@ pub enum PlanEvent {
 
 impl ChainPayload for PlanEvent {
     const DOMAIN: &'static [u8] = b"lex.iac.audit.v1";
+}
+
+/// The gate could not run.
+///
+/// Distinct from a refusal on purpose, and mapped to a distinct exit
+/// code: a refusal is a decision the gate reached, and a pipeline that
+/// conflates the two will eventually read a broken gate as an approval.
+#[derive(Debug, thiserror::Error)]
+pub enum GateError {
+    /// The plan JSON would not parse.
+    #[error(transparent)]
+    Plan(#[from] PlanError),
+    /// The manifest carries an `infra` facet this build cannot read.
+    /// Neither "grants nothing" nor "grants everything" is a safe
+    /// reading of it, so neither is guessed.
+    ///
+    /// Transparent because lex-os's own message already names the facet
+    /// and says it does not parse; wrapping it would only say so twice.
+    #[error(transparent)]
+    Manifest(#[from] ManifestError),
 }
 
 /// Which wall a refusal hit.
@@ -138,16 +160,21 @@ impl Decision {
 /// over-reaches is a `Deny`, not an `Err`. That distinction matters: a
 /// refusal is a normal, recorded outcome, and conflating it with a
 /// malfunction is how refusals end up unlogged.
-pub fn check(plan_json: &str, manifest: &InfraManifest) -> Result<Decision, PlanError> {
+pub fn check(plan_json: &str, manifest: &Manifest) -> Result<Decision, GateError> {
     let plan = compile_str(plan_json)?;
+    // Read the authority before writing anything: a manifest whose
+    // facet will not parse means the gate cannot run, and a request
+    // record would claim it did.
+    let infra = infra_facet(manifest)?;
+
     let mut audit: Chain<PlanEvent> = Chain::new();
-    let manifest_id = manifest.content_id();
+    let manifest_id = manifest.content_id().0;
 
     // Logged before any gate runs.
     audit.append(PlanEvent::PlanRequested {
         plan_sha256: plan.plan_sha256.clone(),
         manifest: manifest_id.clone(),
-        goal: manifest.goal.clone(),
+        goal: manifest.goal.description.clone(),
         effects: plan.required_effects(),
     });
 
@@ -155,7 +182,7 @@ pub fn check(plan_json: &str, manifest: &InfraManifest) -> Result<Decision, Plan
         .rows
         .iter()
         .filter(|row| row.effect.verb.mutates())
-        .filter_map(|row| refuse(row, manifest))
+        .filter_map(|row| refuse(row, &infra))
         .collect();
 
     let verdict = match refusals.split_first() {
@@ -189,9 +216,9 @@ pub fn check(plan_json: &str, manifest: &InfraManifest) -> Result<Decision, Plan
 }
 
 /// Is this row refused, and why?
-fn refuse(row: &EffectRow, manifest: &InfraManifest) -> Option<Refusal> {
+fn refuse(row: &EffectRow, infra: &InfraFacet) -> Option<Refusal> {
     let destroys = row.reversibility == Reversibility::IrreversibleConsequential;
-    match manifest.infra.admits(&row.effect, destroys) {
+    match infra.admits(&row.effect, destroys) {
         Ok(()) => None,
         Err(denial) => {
             let wall = match &denial {
@@ -204,7 +231,7 @@ fn refuse(row: &EffectRow, manifest: &InfraManifest) -> Option<Refusal> {
                 effect: row.effect.qualified(),
                 address: row.address.clone(),
                 reason: denial.to_string(),
-                grant_allows: manifest.infra.allow.clone(),
+                grant_allows: infra.allow.clone(),
             })
         }
     }
@@ -213,17 +240,16 @@ fn refuse(row: &EffectRow, manifest: &InfraManifest) -> Option<Refusal> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lex_os_manifest::{Budget, Grant, Level};
+    use lex_os_manifest::{Budget, Goal, Grant, Level};
 
-    use crate::InfraFacet;
-
-    fn manifest(allow: &[&str]) -> InfraManifest {
-        InfraManifest {
-            goal: "rotate the payments API deployment".into(),
-            grant: Grant::new(Level::None, Level::Allowlist, Level::None),
-            budget: Budget::research_default(),
-            infra: InfraFacet::new(allow.iter().copied()),
-        }
+    fn manifest(allow: &[&str]) -> Manifest {
+        Manifest::new(
+            Goal::new("rotate the payments API deployment"),
+            Grant::new(Level::None, Level::Allowlist, Level::None),
+            Budget::research_default(),
+        )
+        .with_facet(&InfraFacet::new(allow.iter().copied()))
+        .expect("the facet serialises")
     }
 
     const ROTATE: &str = r#"{"resource_changes":[

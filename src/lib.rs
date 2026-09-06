@@ -6,9 +6,9 @@
 //! set of typed effect rows, each classified by blast radius, so a later
 //! stage can check them against the grant that authorises the run.
 //!
-//! Milestone 1 (alpibrusl/lex-iac#2) is this compiler and nothing else:
-//! a pure function over plan JSON, no cloud access, no state backend, no
-//! grant checking yet.
+//! [`compile_str`] is the front half: a pure function over plan JSON —
+//! no cloud access, no credentials, no state backend. [`check`] is the
+//! back half, holding those rows against a [`Manifest`]'s `infra` facet.
 //!
 //! ```
 //! use lex_iac::compile_str;
@@ -38,10 +38,14 @@ use sha2::{Digest, Sha256};
 pub use classify::classify;
 pub use effect::Effect;
 pub use facet::{Denial, InfraFacet, Scope};
-pub use gate::{check, Decision, PlanEvent, Refusal, Verdict, Wall};
-pub use lex_os_manifest::Reversibility;
-pub use manifest::InfraManifest;
+pub use gate::{check, Decision, GateError, PlanEvent, Refusal, Verdict, Wall};
+pub use manifest::{infra_facet, narrow, registry};
 pub use plan::{Plan, PlanError, Verb};
+
+/// The manifest a run is authorised by is lex-os's, not this crate's.
+/// Re-exported so a consumer needs one dependency, not two, and so the
+/// identity of the type is unambiguous: there is exactly one.
+pub use lex_os_manifest::{Manifest, Reversibility};
 
 /// One resource change, compiled.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
