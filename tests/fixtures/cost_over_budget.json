@@ -1,0 +1,17 @@
+{
+  "version": "0.2",
+  "currency": "USD",
+  "projects": [
+    {
+      "name": "payments",
+      "diff": {
+        "totalMonthlyCost": "412.90",
+        "resources": [
+          { "name": "aws_db_instance.payments", "monthlyCost": "380.00" },
+          { "name": "aws_ecs_service.api", "monthlyCost": "32.90" }
+        ]
+      }
+    }
+  ],
+  "diffTotalMonthlyCost": "412.90"
+}

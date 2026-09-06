@@ -1,0 +1,17 @@
+{
+  "version": "0.2",
+  "currency": "USD",
+  "projects": [
+    {
+      "name": "payments",
+      "diff": {
+        "totalMonthlyCost": "12.40",
+        "resources": [
+          { "name": "aws_ecs_task_definition.api", "monthlyCost": "0.00" },
+          { "name": "aws_ecs_service.api", "monthlyCost": "12.40" }
+        ]
+      }
+    }
+  ],
+  "diffTotalMonthlyCost": "12.40"
+}

@@ -5,6 +5,8 @@
 //!   → effects        plan → effect rows                        (#2)
 //!   → narrowing      every effect ⊆ the infra facet
 //!   → reversibility  destroying state needs the verb named
+//!   → spend_charged  the predicted delta, recorded              (#4)
+//!   → budget         the delta must fit `max_money_cents`
 //!   → plan_accepted | plan_refused
 //! ```
 //!
@@ -14,6 +16,11 @@
 //! lex-os's supervisor uses, and it means a refusal is exactly as
 //! legible in the record as an approval. A gate that logged only what it
 //! allowed would be a gate you could not audit.
+//!
+//! **The budget leg sits after reversibility, before allow**, matching
+//! lex-os's gate order, and the charge is recorded whether or not it
+//! fits. A budget you can only see when it was exceeded is not a
+//! budget anyone can plan against.
 //!
 //! **A verdict is `Allow`, `Deny` or `Inconclusive`.** The third is
 //! borrowed from `lex-guard`, which had it right: something the gate
@@ -26,7 +33,8 @@ use lex_os_manifest::{Manifest, ManifestError, Reversibility};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    compile_str, manifest::infra_facet, CompiledPlan, Denial, EffectRow, InfraFacet, PlanError,
+    compile_str, cost::CostError, facet::Gravity, manifest::infra_facet, CompiledPlan, CostReport,
+    Denial, EffectRow, InfraFacet, PlanError, Verb,
 };
 
 /// What this gate records. lex-os knows nothing about any of it — which
@@ -41,6 +49,15 @@ pub enum PlanEvent {
         manifest: String,
         goal: String,
         effects: Vec<String>,
+    },
+    /// The predicted spend, recorded before the budget wall decides —
+    /// so an approval carries the number it was approved against, not
+    /// only a refusal.
+    SpendCharged {
+        plan_sha256: String,
+        currency: String,
+        monthly_delta_minor: i64,
+        budget_minor: u64,
     },
     PlanAccepted {
         plan_sha256: String,
@@ -79,6 +96,11 @@ pub enum GateError {
     /// and says it does not parse; wrapping it would only say so twice.
     #[error(transparent)]
     Manifest(#[from] ManifestError),
+    /// The cost report could not be read, or is denominated
+    /// differently from the budget. An estimator that ran and produced
+    /// something unreadable is not evidence of a free change.
+    #[error(transparent)]
+    Cost(#[from] CostError),
 }
 
 /// Which wall a refusal hit.
@@ -89,6 +111,8 @@ pub enum Wall {
     Narrowing,
     /// The effect destroys state the grant does not name explicitly.
     Reversibility,
+    /// The predicted spend exceeds `budget.max_money_cents`.
+    Budget,
     /// The gate could not read the effect well enough to check it.
     Unreadable,
 }
@@ -98,6 +122,7 @@ impl Wall {
         match self {
             Wall::Narrowing => "narrowing",
             Wall::Reversibility => "reversibility",
+            Wall::Budget => "budget",
             Wall::Unreadable => "unreadable",
         }
     }
@@ -141,6 +166,9 @@ pub struct Decision {
     pub verdict: Verdict,
     pub plan: CompiledPlan,
     pub audit: Chain<PlanEvent>,
+    /// The predicted monthly delta in minor units, when an estimate was
+    /// supplied. `None` means *unpriced*, never zero.
+    pub charged: Option<i64>,
 }
 
 impl Decision {
@@ -156,16 +184,31 @@ impl Decision {
 
 /// Check a plan against a manifest.
 ///
-/// The only error is a plan that will not parse; a plan that parses but
-/// over-reaches is a `Deny`, not an `Err`. That distinction matters: a
-/// refusal is a normal, recorded outcome, and conflating it with a
-/// malfunction is how refusals end up unlogged.
-pub fn check(plan_json: &str, manifest: &Manifest) -> Result<Decision, GateError> {
+/// `cost` is the predicted spend, from whatever estimator the team
+/// already runs. It is an `Option` rather than a default because the
+/// two cases are genuinely different and the caller has to say which it
+/// is in: **no estimate is not an estimate of zero**. Without one, a
+/// row that creates or replaces infrastructure has an unknown price,
+/// and an unknown price is treated as consequential — a wildcard will
+/// not authorise it, the verb has to be named. See [`unpriced`].
+///
+/// The only errors are inputs the gate cannot read; a plan that parses
+/// but over-reaches is a `Deny`, not an `Err`. That distinction
+/// matters: a refusal is a normal, recorded outcome, and conflating it
+/// with a malfunction is how refusals end up unlogged.
+pub fn check(
+    plan_json: &str,
+    manifest: &Manifest,
+    cost: Option<&CostReport>,
+) -> Result<Decision, GateError> {
     let plan = compile_str(plan_json)?;
     // Read the authority before writing anything: a manifest whose
     // facet will not parse means the gate cannot run, and a request
     // record would claim it did.
     let infra = infra_facet(manifest)?;
+    if let Some(c) = cost {
+        c.check_currency(&infra.currency)?;
+    }
 
     let mut audit: Chain<PlanEvent> = Chain::new();
     let manifest_id = manifest.content_id().0;
@@ -178,12 +221,28 @@ pub fn check(plan_json: &str, manifest: &Manifest) -> Result<Decision, GateError
         effects: plan.required_effects(),
     });
 
-    let refusals: Vec<Refusal> = plan
+    let mut refusals: Vec<Refusal> = plan
         .rows
         .iter()
         .filter(|row| row.effect.verb.mutates())
-        .filter_map(|row| refuse(row, &infra))
+        .filter_map(|row| refuse(row, &infra, cost.is_some()))
         .collect();
+
+    // The budget leg: after reversibility, before allow. Recorded
+    // whether or not it fits — a budget you only see when it was
+    // exceeded is not a budget anyone can plan against.
+    if let Some(c) = cost {
+        let budget = manifest.budget.max_money_cents;
+        audit.append(PlanEvent::SpendCharged {
+            plan_sha256: plan.plan_sha256.clone(),
+            currency: infra.currency.clone(),
+            monthly_delta_minor: c.monthly_delta_minor,
+            budget_minor: budget,
+        });
+        if let Some(r) = over_budget(c, budget, &infra) {
+            refusals.push(r);
+        }
+    }
 
     let verdict = match refusals.split_first() {
         None => {
@@ -212,18 +271,83 @@ pub fn check(plan_json: &str, manifest: &Manifest) -> Result<Decision, GateError
         verdict,
         plan,
         audit,
+        charged: cost.map(|c| c.monthly_delta_minor),
     })
 }
 
+/// Does a verb add cost the estimator would have had to price?
+///
+/// `create` and `replace` bring resources into existence. `update` can
+/// resize one, and is deliberately *not* here: escalating every update
+/// would refuse nearly every plan, and the pressure that puts on
+/// operators is to widen the grant until it means nothing — the exact
+/// failure this project exists to prevent. It is a real gap, named in
+/// the README rather than papered over.
+pub fn unpriced(verb: Verb) -> bool {
+    matches!(verb, Verb::Create | Verb::Replace)
+}
+
+/// The predicted delta against the ceiling.
+///
+/// A *negative* delta is a saving, and is never refused: charging a
+/// teardown against the budget would refuse exactly the changes an
+/// operator most wants to make.
+fn over_budget(cost: &CostReport, budget_minor: u64, infra: &InfraFacet) -> Option<Refusal> {
+    let delta = cost.monthly_delta_minor;
+    if delta <= 0 || (delta as u128) <= budget_minor as u128 {
+        return None;
+    }
+    let (address, share) = match cost.dominant_address() {
+        Some((a, c)) => (a.to_string(), format!(", of which `{a}` is {}", money(c))),
+        None => ("(whole plan)".to_string(), String::new()),
+    };
+    Some(Refusal {
+        wall: Wall::Budget,
+        effect: "spend".to_string(),
+        address,
+        reason: format!(
+            "predicted monthly spend rises by {}{share}, and the grant's budget is {} \
+             ({} over) — this is a ceiling on forecast spend, not a meter",
+            money(delta),
+            money(budget_minor as i64),
+            money(delta - budget_minor as i64),
+        ),
+        grant_allows: infra.allow.clone(),
+    })
+}
+
+/// Minor units as a decimal, without going near a float.
+fn money(minor: i64) -> String {
+    let sign = if minor < 0 { "-" } else { "" };
+    let n = minor.unsigned_abs();
+    format!("{sign}{}.{:02}", n / 100, n % 100)
+}
+
 /// Is this row refused, and why?
-fn refuse(row: &EffectRow, infra: &InfraFacet) -> Option<Refusal> {
-    let destroys = row.reversibility == Reversibility::IrreversibleConsequential;
-    match infra.admits(&row.effect, destroys) {
+fn refuse(row: &EffectRow, infra: &InfraFacet, priced: bool) -> Option<Refusal> {
+    // Two reasons a wildcard will not do, and they are kept apart:
+    // destroying state is not the same as nobody having priced the
+    // change, and an operator told their `aws.ecs.create` "destroys
+    // stateful infrastructure" loses the time it takes to find out it
+    // does not. Destruction wins when both apply — it is the graver of
+    // the two, and the one an estimate would not resolve.
+    let gravity = if row.reversibility == Reversibility::IrreversibleConsequential {
+        Gravity::DestroysState
+    } else if !priced && unpriced(row.effect.verb) {
+        Gravity::Unpriced
+    } else {
+        Gravity::Routine
+    };
+    match infra.admits(&row.effect, gravity) {
         Ok(()) => None,
         Err(denial) => {
             let wall = match &denial {
                 Denial::NotGranted => Wall::Narrowing,
-                Denial::WildcardCannotAuthoriseDestruction { .. } => Wall::Reversibility,
+                Denial::WildcardIsNotEnough {
+                    why: Gravity::Unpriced,
+                    ..
+                } => Wall::Budget,
+                Denial::WildcardIsNotEnough { .. } => Wall::Reversibility,
                 Denial::Unreadable(_) => Wall::Unreadable,
             };
             Some(Refusal {
@@ -266,7 +390,7 @@ mod tests {
 
     #[test]
     fn an_in_grant_plan_is_allowed_and_recorded() {
-        let d = check(ROTATE, &manifest(&["aws.ecs.*"])).unwrap();
+        let d = check(ROTATE, &manifest(&["aws.ecs.*"]), None).unwrap();
         assert!(d.verdict.allowed());
         assert_eq!(d.exit_code(), 0);
         assert_eq!(d.audit.len(), 2);
@@ -277,7 +401,7 @@ mod tests {
     /// destroying a database.
     #[test]
     fn a_wildcard_grant_does_not_authorise_the_hidden_replace() {
-        let d = check(REPLACE_DB, &manifest(&["aws.ecs.*", "aws.rds.*"])).unwrap();
+        let d = check(REPLACE_DB, &manifest(&["aws.ecs.*", "aws.rds.*"]), None).unwrap();
         assert_eq!(d.exit_code(), 8);
         let Verdict::Deny { first, .. } = &d.verdict else {
             panic!("expected a refusal, got {:?}", d.verdict);
@@ -290,13 +414,18 @@ mod tests {
 
     #[test]
     fn naming_the_verb_authorises_it() {
-        let d = check(REPLACE_DB, &manifest(&["aws.ecs.*", "aws.rds.replace"])).unwrap();
+        let d = check(
+            REPLACE_DB,
+            &manifest(&["aws.ecs.*", "aws.rds.replace"]),
+            None,
+        )
+        .unwrap();
         assert!(d.verdict.allowed(), "{:?}", d.verdict);
     }
 
     #[test]
     fn an_effect_outside_the_grant_hits_the_narrowing_wall() {
-        let d = check(ROTATE, &manifest(&["aws.iam.read"])).unwrap();
+        let d = check(ROTATE, &manifest(&["aws.iam.read"]), None).unwrap();
         let Verdict::Deny { first, .. } = &d.verdict else {
             panic!("expected a refusal");
         };
@@ -308,7 +437,7 @@ mod tests {
     /// less legible than an approval.
     #[test]
     fn the_request_is_logged_before_the_decision() {
-        let d = check(REPLACE_DB, &manifest(&["aws.ecs.*"])).unwrap();
+        let d = check(REPLACE_DB, &manifest(&["aws.ecs.*"]), None).unwrap();
         assert_eq!(d.audit.len(), 2);
         assert!(matches!(
             d.audit.entries()[0].event,
@@ -324,7 +453,7 @@ mod tests {
     #[test]
     fn every_refusal_is_carried_not_just_the_first() {
         // Neither effect is granted.
-        let d = check(REPLACE_DB, &manifest(&["gcp.sql.create"])).unwrap();
+        let d = check(REPLACE_DB, &manifest(&["gcp.sql.create"]), None).unwrap();
         let Verdict::Deny { all, .. } = &d.verdict else {
             panic!("expected a refusal");
         };
@@ -333,20 +462,20 @@ mod tests {
 
     #[test]
     fn an_empty_plan_is_allowed() {
-        let d = check(r#"{"resource_changes":[]}"#, &manifest(&[])).unwrap();
+        let d = check(r#"{"resource_changes":[]}"#, &manifest(&[]), None).unwrap();
         assert!(d.verdict.allowed());
     }
 
     #[test]
     fn a_malformed_plan_is_an_error_not_a_verdict() {
-        assert!(check("{not json", &manifest(&["aws.ecs.*"])).is_err());
+        assert!(check("{not json", &manifest(&["aws.ecs.*"]), None).is_err());
     }
 
     /// A refusal pins the same bytes the request did, so an accepted
     /// plan cannot be swapped for another after the fact.
     #[test]
     fn the_audit_record_pins_the_plan_bytes() {
-        let d = check(ROTATE, &manifest(&["aws.ecs.*"])).unwrap();
+        let d = check(ROTATE, &manifest(&["aws.ecs.*"]), None).unwrap();
         let PlanEvent::PlanRequested { plan_sha256, .. } = &d.audit.entries()[0].event else {
             panic!("expected plan_requested");
         };

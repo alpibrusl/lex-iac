@@ -33,6 +33,7 @@ cargo run -- check --grant tests/fixtures/grant_with_rds_wildcard.json \
 goal:      manage the payments stack
 plan:      sha256:2e788cc61dd7…
 grant:     manifest:81540195a8cf
+spend:     unpriced — no --cost report
 
 REFUSED — 1 effect(s) outside the grant:
 
@@ -74,13 +75,36 @@ cargo run -- manifest narrow --parent tests/fixtures/grant_org_parent.json \
 #   which the parent does not grant (a child manifest may only narrow)
 ```
 
+And spend is a wall like any other:
+
+```sh
+cargo run -- check --grant tests/fixtures/grant_names_the_replace.json \
+                   --plan  tests/fixtures/harmless_tag_change.json \
+                   --cost  tests/fixtures/cost_over_budget.json
+```
+
+```
+spend:     USD 412.90 / month against a ceiling of 50.00 (forecast, not a meter)
+
+REFUSED — 1 effect(s) outside the grant:
+
+  spend  [budget]
+    at:     aws_db_instance.payments
+    reason: predicted monthly spend rises by 412.90, of which
+            `aws_db_instance.payments` is 380.00, and the grant's budget is
+            50.00 (362.90 over) — this is a ceiling on forecast spend, not a meter
+```
+
 On your own plan:
 
 ```sh
 terraform plan -out=p.tfplan && terraform show -json p.tfplan > plan.json
-cargo run -- check --grant env.json --plan plan.json     # exit 0 or 8
+infracost breakdown --path p.tfplan --format json > cost.json
+
+cargo run -- check --grant env.json --plan plan.json --cost cost.json   # exit 0 or 8
 cargo run --example compile_plan -- plan.json            # just the effect rows
 cargo run --example one_manifest                         # the manifest, end to end
+cargo run --example budget_wall                          # the budget, end to end
 ```
 
 Exit codes follow lex-os: `0` allowed, `8` refused, `2` the gate could
@@ -88,20 +112,30 @@ not run. The 8-versus-2 distinction is load-bearing — a refusal is a
 decision, not a malfunction, and a pipeline that conflates them will
 eventually read a broken gate as an approval.
 
+Which is also why **a document that is not a plan is exit 2, never exit
+0**. `{"resource_changes": []}` is an empty plan and there is nothing in
+it to authorise; a document that merely *omits* `resource_changes` is a
+failed `terraform show -json`, a truncated redirect, or another tool's
+output, and the gate will not approve what it cannot read. A row with no
+`actions` is the same rule one level down: it classifies as unknown, not
+as a no-op.
+
 ## Where this is
 
-**Milestones 1 and 2 of [#1](https://github.com/alpibrusl/lex-iac/issues/1).**
-The plan compiles to effect rows ([#2](https://github.com/alpibrusl/lex-iac/issues/2))
-and the gate checks them against a grant, refusing what it does not
-cover ([#3](https://github.com/alpibrusl/lex-iac/issues/3)).
+**Milestones 1–3 of [#1](https://github.com/alpibrusl/lex-iac/issues/1).**
+The plan compiles to effect rows ([#2](https://github.com/alpibrusl/lex-iac/issues/2)),
+the gate checks them against a grant, refusing what it does not
+cover ([#3](https://github.com/alpibrusl/lex-iac/issues/3)), and forecast
+spend is charged against the manifest's budget
+([#4](https://github.com/alpibrusl/lex-iac/issues/4)).
 
 A grant file is a `lex_os_manifest::Manifest` — one manifest, one
 `ManifestId`, one narrowing wall, with `infra` as a facet on it. That
 was the acceptance test for
 [lex-os#71](https://github.com/alpibrusl/lex-os/issues/71).
 
-Not yet here: budget ([#4](https://github.com/alpibrusl/lex-iac/issues/4)),
-attestation, and running the apply itself inside a perimeter.
+Not yet here: attestation, and running the apply itself inside a
+perimeter.
 
 ## The effect model
 
@@ -156,7 +190,8 @@ A grant file **is** a `lex_os_manifest::Manifest` — the same JSON
   "facets": {
     "infra": {
       "allow": ["aws.ecs.*", "aws.cloudwatch.*", "aws.iam.read"],
-      "scope": { "account": "123456789012", "region": ["eu-west-1"] }
+      "scope": { "account": "123456789012", "region": ["eu-west-1"] },
+      "currency": "USD"
     }
   }
 }
@@ -191,7 +226,7 @@ recorded like any other. A facet that is present but *unreadable* is
 different: the gate exits 2 rather than guessing, because neither
 "grants nothing" nor "grants everything" is a safe reading of it.
 
-## The two walls
+## The three walls
 
 **Narrowing.** Every mutating effect must be admitted by the facet.
 Nothing else applies.
@@ -203,8 +238,43 @@ wildcard will not do. `aws.rds.*` reads to an operator as "manage RDS",
 not "you may delete the production database", and the gate holds it to
 the first reading.
 
+**Budget.** The forecast monthly delta is charged against
+`budget.max_money_cents`, in integer minor units, and the plan is
+refused if it does not fit. Pass `--cost` with the JSON your estimator
+already produces (Infracost today).
+
+> **No estimate is not an estimate of zero.**
+
+Without `--cost`, a `create` or `replace` has no known price, and
+"nobody measured it" must not read as "it is free". Those rows need
+their verb named in the grant — the same explicitness a destructive
+verb needs, for its own reason, which the refusal states rather than
+conflating:
+
+```
+aws.ecs.create  [budget]
+  reason: only `aws.ecs.*` admits it, and nothing has priced this change,
+          so a wildcard cannot authorise it — supply a cost estimate, or
+          name the verb explicitly
+```
+
+Two ways out, both deliberate: supply the estimate, or name the verb.
+An `update` is *not* escalated this way, though resizing an instance
+does cost money — escalating every update would refuse nearly every
+plan, and the pressure that puts on operators is to widen the grant
+until it means nothing. A real gap, named here rather than papered
+over.
+
+`currency` sits on the facet because `max_money_cents` is a bare
+integer: nothing in it says which currency, so ¥5000 is not $50, and a
+child that redenominated its budget would have widened it. A report in
+another currency stops the gate rather than being converted.
+
 Every check writes `plan_requested` to a hash-chained log **before** any
-wall runs, then `plan_accepted` or `plan_refused`. That ordering is
+wall runs, then `spend_charged` when there is an estimate — whether or
+not it fits, because a budget you can only see once it was exceeded is
+not a budget anyone can plan against — then `plan_accepted` or
+`plan_refused`. That ordering is
 lex-os's, and it is why a refusal is exactly as auditable as an
 approval. The chain is `lex_os_audit::Chain<E>`, carrying this gate's
 own event vocabulary — lex-os made it generic (lex-os#67) so a
@@ -225,7 +295,12 @@ downstream gate would not reimplement tamper-evidence.
    `aws_db_instance`. A grant nobody would think to write is a grant
    written too broadly, so a short alias map fixes the genuine
    mismatches. It will need extending.
-4. **Narrowing a facet is subsumption; admitting an effect is not.** A
+4. **The budget bounds forecast spend, not actual spend.** Every
+   estimator prices the resources it knows, at list rates, ignoring
+   commitments, tiering and usage. A reader who treats this as a meter
+   will size the budget wrong. It is also monthly, so a plan that is
+   cheap per month and enormous per year passes.
+5. **Narrowing a facet is subsumption; admitting an effect is not.** A
    parent granting `aws.rds.*` does let a child inherit
    `aws.rds.delete` — the child is genuinely no wider than its parent.
    Neither manifest thereby authorises destroying a database: that is

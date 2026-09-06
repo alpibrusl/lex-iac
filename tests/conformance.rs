@@ -159,8 +159,26 @@ fn malformed_input_never_panics() {
         let _ = compile_str(case);
     }
 
-    // The shapes that *do* parse still classify sanely.
+    // "Never panics" is a weak property, and on its own it let a real
+    // hole stand: a row with nothing in it used to classify
+    // `ReversibleCheap` and sail through the gate. What matters is that
+    // a shape we cannot read is never the *harmless* answer.
     let c = compile_str(r#"{"resource_changes":[{}]}"#).unwrap();
     assert_eq!(c.rows.len(), 1);
-    assert_eq!(c.rows[0].reversibility, Reversibility::ReversibleCheap);
+    assert_eq!(
+        c.rows[0].reversibility,
+        Reversibility::IrreversibleConsequential,
+        "a row that says nothing is not thereby a row that does nothing"
+    );
+    assert!(c.has_consequential(), "so the gate has something to refuse");
+
+    // And a document that is JSON but not a plan is refused outright,
+    // rather than read as a plan with nothing in it.
+    for not_a_plan in ["[]", "{}", r#"{"format_version":"1.2"}"#] {
+        let compiled = compile_str(not_a_plan);
+        assert!(
+            compiled.is_err(),
+            "{not_a_plan} must not compile to an empty, approvable plan"
+        );
+    }
 }
