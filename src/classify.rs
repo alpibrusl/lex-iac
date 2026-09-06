@@ -20,6 +20,20 @@
 //! `lex-os-manifest` refuses by construction unless the grant bounds it.
 //! A table miss must never read as "probably fine".
 //!
+//! # Keyed on the resource, not on Terraform's spelling
+//!
+//! The tables below were once lists of Terraform type strings. Adding
+//! Pulumi (alpibrusl/lex-iac#10) showed the cost: `aws:rds/instance:Instance`
+//! matched nothing, so every Pulumi resource read as unrecognised and
+//! every teardown classified consequential. Safe, and useless — a gate
+//! that refuses every delete whatever the grant says is one operators
+//! route around.
+//!
+//! So they key on [`ResourceKey`] — `provider.service.kind` — which both
+//! frontends map onto from opposite directions. The kind is part of the
+//! key because service granularity is wrong in the dangerous direction:
+//! `aws.s3.bucket` holds data and `aws.s3.bucketpolicy` does not.
+//!
 //! Creates and updates on an unknown type stay `IrreversibleBounded`
 //! rather than escalating: a plan that touches one unrecognised resource
 //! would otherwise be refused wholesale, and the pressure that puts on
@@ -31,6 +45,7 @@
 use lex_os_manifest::Reversibility;
 
 use crate::plan::Verb;
+use crate::resource::ResourceKey;
 
 /// Resource types that hold data whose destruction is not recoverable by
 /// re-running the plan.
@@ -41,38 +56,38 @@ use crate::plan::Verb;
 ///
 /// Being absent from this list does not mean "stateless"; see
 /// [`is_stateful`].
-const STATEFUL_TYPES: &[&str] = &[
+const STATEFUL: &[&str] = &[
     // AWS — databases, object stores, volumes, keys, zones.
-    "aws_db_instance",
-    "aws_rds_cluster",
-    "aws_rds_cluster_instance",
-    "aws_dynamodb_table",
-    "aws_s3_bucket",
-    "aws_ebs_volume",
-    "aws_efs_file_system",
-    "aws_elasticache_cluster",
-    "aws_elasticache_replication_group",
-    "aws_kms_key",
-    "aws_route53_zone",
-    "aws_redshift_cluster",
-    "aws_docdb_cluster",
+    "aws.rds.instance",
+    "aws.rds.cluster",
+    "aws.rds.clusterinstance",
+    "aws.dynamodb.table",
+    "aws.s3.bucket",
+    "aws.ebs.volume",
+    "aws.efs.filesystem",
+    "aws.elasticache.cluster",
+    "aws.elasticache.replicationgroup",
+    "aws.kms.key",
+    "aws.route53.zone",
+    "aws.redshift.cluster",
+    "aws.docdb.cluster",
     // GCP.
-    "google_sql_database_instance",
-    "google_storage_bucket",
-    "google_bigtable_instance",
-    "google_spanner_instance",
-    "google_kms_crypto_key",
-    "google_dns_managed_zone",
+    "gcp.sql.databaseinstance",
+    "gcp.storage.bucket",
+    "gcp.bigtable.instance",
+    "gcp.spanner.instance",
+    "gcp.kms.cryptokey",
+    "gcp.dns.managedzone",
     // Azure.
-    "azurerm_storage_account",
-    "azurerm_mssql_database",
-    "azurerm_postgresql_flexible_server",
-    "azurerm_key_vault",
-    "azurerm_dns_zone",
+    "azure.storage.account",
+    "azure.mssql.database",
+    "azure.postgresql.flexibleserver",
+    "azure.keyvault.keyvault",
+    "azure.dns.zone",
     // Kubernetes.
-    "kubernetes_persistent_volume",
-    "kubernetes_persistent_volume_claim",
-    "kubernetes_secret",
+    "k8s.persistent.volume",
+    "k8s.persistent.volumeclaim",
+    "k8s.secret.secret",
 ];
 
 /// Is this resource type known to hold durable state?
@@ -80,8 +95,9 @@ const STATEFUL_TYPES: &[&str] = &[
 /// Returns `true` for anything in [`STATEFUL_TYPES`] **and for anything
 /// this build does not recognise at all** — see [`is_known`]. The two
 /// cases differ in what they mean, not in how destruction is treated.
-pub fn is_stateful(resource_type: &str) -> bool {
-    !is_known(resource_type) || STATEFUL_TYPES.contains(&resource_type)
+pub fn is_stateful(key: &ResourceKey) -> bool {
+    let q = key.qualified();
+    !is_known(key) || STATEFUL.contains(&q.as_str())
 }
 
 /// Resource types this build recognises as stateless, so a table miss is
@@ -90,39 +106,41 @@ pub fn is_stateful(resource_type: &str) -> bool {
 /// Kept explicit for the same reason the stateful list is: an operator
 /// reading a refusal deserves to know whether the gate classified the
 /// type or merely failed to recognise it.
-const STATELESS_TYPES: &[&str] = &[
-    "aws_ecs_service",
-    "aws_ecs_task_definition",
-    "aws_cloudwatch_log_group",
-    "aws_iam_role",
-    "aws_iam_policy",
-    "aws_iam_role_policy_attachment",
-    "aws_security_group",
-    "aws_security_group_rule",
-    "aws_lb",
-    "aws_lb_listener",
-    "aws_lb_target_group",
-    "aws_lambda_function",
-    "aws_cloudwatch_metric_alarm",
-    "google_cloud_run_service",
-    "google_service_account",
-    "google_project_iam_member",
-    "kubernetes_deployment",
-    "kubernetes_service",
-    "kubernetes_config_map",
-    "kubernetes_ingress_v1",
+const STATELESS: &[&str] = &[
+    "aws.ecs.service",
+    "aws.ecs.taskdefinition",
+    "aws.cloudwatch.loggroup",
+    "aws.iam.role",
+    "aws.iam.policy",
+    "aws.iam.rolepolicyattachment",
+    "aws.security.group",
+    "aws.security.grouprule",
+    "aws.elb.lb",
+    "aws.elb.listener",
+    "aws.elb.targetgroup",
+    "aws.lambda.function",
+    "aws.cloudwatch.metricalarm",
+    "aws.s3.bucketpolicy",
+    "gcp.cloud.runservice",
+    "gcp.service.account",
+    "gcp.project.iammember",
+    "k8s.deployment.deployment",
+    "k8s.service.service",
+    "k8s.config.map",
+    "k8s.ingress.v1",
 ];
 
 /// Does this build have an opinion about `resource_type` at all?
-pub fn is_known(resource_type: &str) -> bool {
-    STATEFUL_TYPES.contains(&resource_type) || STATELESS_TYPES.contains(&resource_type)
+pub fn is_known(key: &ResourceKey) -> bool {
+    let q = key.qualified();
+    STATEFUL.contains(&q.as_str()) || STATELESS.contains(&q.as_str())
 }
 
 /// Classify one change's blast radius.
 ///
 /// `mode` is the plan's `mode` field: a `data` block reads, so it never
 /// rises above `ReversibleCheap` however its actions are spelled.
-pub fn classify(resource_type: &str, verb: Verb, mode: &str) -> Reversibility {
+pub fn classify(key: &ResourceKey, verb: Verb, mode: &str) -> Reversibility {
     if mode == "data" {
         return Reversibility::ReversibleCheap;
     }
@@ -130,7 +148,7 @@ pub fn classify(resource_type: &str, verb: Verb, mode: &str) -> Reversibility {
         Verb::NoOp | Verb::Read => Reversibility::ReversibleCheap,
         Verb::Create | Verb::Update => Reversibility::IrreversibleBounded,
         Verb::Delete | Verb::Replace => {
-            if is_stateful(resource_type) {
+            if is_stateful(key) {
                 Reversibility::IrreversibleConsequential
             } else {
                 Reversibility::IrreversibleBounded
@@ -145,11 +163,18 @@ pub fn classify(resource_type: &str, verb: Verb, mode: &str) -> Reversibility {
 mod tests {
     use super::*;
 
+    /// The tables are canonical now, but these tests are written in
+    /// Terraform's spelling on purpose: it is the frontend that had to
+    /// be re-keyed, so it is the one worth pinning.
+    fn tf(resource_type: &str) -> ResourceKey {
+        ResourceKey::from_terraform(resource_type)
+    }
+
     #[test]
     fn destroying_a_known_stateful_type_is_consequential() {
         for verb in [Verb::Delete, Verb::Replace] {
             assert_eq!(
-                classify("aws_db_instance", verb, "managed"),
+                classify(&tf("aws_db_instance"), verb, "managed"),
                 Reversibility::IrreversibleConsequential
             );
         }
@@ -158,7 +183,7 @@ mod tests {
     #[test]
     fn destroying_a_known_stateless_type_is_merely_bounded() {
         assert_eq!(
-            classify("aws_ecs_service", Verb::Delete, "managed"),
+            classify(&tf("aws_ecs_service"), Verb::Delete, "managed"),
             Reversibility::IrreversibleBounded
         );
     }
@@ -167,14 +192,14 @@ mod tests {
     /// assumed safe to destroy.
     #[test]
     fn destroying_an_unknown_type_is_consequential() {
-        assert!(!is_known("acme_widget_cluster"));
-        assert!(is_stateful("acme_widget_cluster"));
+        assert!(!is_known(&tf("acme_widget_cluster")));
+        assert!(is_stateful(&tf("acme_widget_cluster")));
         assert_eq!(
-            classify("acme_widget_cluster", Verb::Delete, "managed"),
+            classify(&tf("acme_widget_cluster"), Verb::Delete, "managed"),
             Reversibility::IrreversibleConsequential
         );
         assert_eq!(
-            classify("acme_widget_cluster", Verb::Replace, "managed"),
+            classify(&tf("acme_widget_cluster"), Verb::Replace, "managed"),
             Reversibility::IrreversibleConsequential
         );
     }
@@ -185,7 +210,7 @@ mod tests {
     #[test]
     fn creating_an_unknown_type_stays_bounded() {
         assert_eq!(
-            classify("acme_widget_cluster", Verb::Create, "managed"),
+            classify(&tf("acme_widget_cluster"), Verb::Create, "managed"),
             Reversibility::IrreversibleBounded
         );
     }
@@ -193,7 +218,7 @@ mod tests {
     #[test]
     fn an_unreadable_action_list_is_consequential() {
         assert_eq!(
-            classify("aws_ecs_service", Verb::Unknown, "managed"),
+            classify(&tf("aws_ecs_service"), Verb::Unknown, "managed"),
             Reversibility::IrreversibleConsequential
         );
     }
@@ -201,11 +226,11 @@ mod tests {
     #[test]
     fn data_sources_never_rise_above_cheap() {
         assert_eq!(
-            classify("aws_db_instance", Verb::Read, "data"),
+            classify(&tf("aws_db_instance"), Verb::Read, "data"),
             Reversibility::ReversibleCheap
         );
         assert_eq!(
-            classify("aws_db_instance", Verb::Delete, "data"),
+            classify(&tf("aws_db_instance"), Verb::Delete, "data"),
             Reversibility::ReversibleCheap
         );
     }
@@ -213,11 +238,11 @@ mod tests {
     #[test]
     fn reads_and_noops_are_cheap() {
         assert_eq!(
-            classify("aws_s3_bucket", Verb::NoOp, "managed"),
+            classify(&tf("aws_s3_bucket"), Verb::NoOp, "managed"),
             Reversibility::ReversibleCheap
         );
         assert_eq!(
-            classify("aws_s3_bucket", Verb::Read, "managed"),
+            classify(&tf("aws_s3_bucket"), Verb::Read, "managed"),
             Reversibility::ReversibleCheap
         );
     }
