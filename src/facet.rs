@@ -50,7 +50,7 @@ pub struct Scope {
 }
 
 /// The `infra` facet.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InfraFacet {
     /// `provider.service.verb` patterns. Nothing outside these is
     /// authorised.
@@ -58,6 +58,32 @@ pub struct InfraFacet {
     pub allow: Vec<String>,
     #[serde(default)]
     pub scope: Scope,
+    /// What `budget.max_money_cents` is denominated in (#4).
+    ///
+    /// lex-os's budget is a bare integer, so nothing in it says which
+    /// currency. A cost report in another one is refused rather than
+    /// charged: EUR against a ceiling sized in USD is wrong by whatever
+    /// the rate is that day, silently and in whichever direction.
+    ///
+    /// It sits on the facet rather than in CLI configuration because a
+    /// child that redenominated its budget would have widened it —
+    /// ¥5000 is not $50 — so it has to narrow with everything else.
+    #[serde(default = "default_currency")]
+    pub currency: String,
+}
+
+fn default_currency() -> String {
+    "USD".to_string()
+}
+
+impl Default for InfraFacet {
+    fn default() -> Self {
+        InfraFacet {
+            allow: Vec::new(),
+            scope: Scope::default(),
+            currency: default_currency(),
+        }
+    }
 }
 
 /// A parsed allow entry.
@@ -104,14 +130,61 @@ impl<'a> Pattern<'a> {
     }
 }
 
+/// Why an effect needs its verb spelled out, rather than being covered
+/// by a wildcard.
+///
+/// Two different reasons, kept apart because they send an operator to
+/// different places. Telling someone their `aws.ecs.create` "destroys
+/// stateful infrastructure" is a lie that costs them the time it takes
+/// to work out it is one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gravity {
+    /// A wildcard is enough.
+    Routine,
+    /// Destroys state that re-running cannot restore. `aws.rds.*` reads
+    /// to an operator as "manage RDS", not "you may delete the
+    /// production database", and the gate holds it to the first
+    /// reading.
+    DestroysState,
+    /// Nobody priced it (alpibrusl/lex-iac#4). "We did not measure it"
+    /// must not read as "it is free", so an unpriced create needs the
+    /// same explicitness — either an estimate, or the verb named.
+    Unpriced,
+}
+
+impl Gravity {
+    pub fn needs_the_verb_named(self) -> bool {
+        !matches!(self, Gravity::Routine)
+    }
+
+    /// The second half of a refusal: what a wildcard cannot do here,
+    /// and what the operator can do about it. Each reason carries its
+    /// own remedy, because they are different remedies.
+    fn as_reason(self) -> &'static str {
+        match self {
+            // Never rendered: a routine effect is not denied.
+            Gravity::Routine => "it is authorised",
+            Gravity::DestroysState => {
+                "a wildcard cannot authorise destruction of stateful \
+                 infrastructure — name the verb explicitly"
+            }
+            Gravity::Unpriced => {
+                "nothing has priced this change, so a wildcard cannot \
+                 authorise it — supply a cost estimate, or name the verb \
+                 explicitly"
+            }
+        }
+    }
+}
+
 /// Why an effect is not authorised.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Denial {
     /// Nothing in `allow` admits it.
     NotGranted,
-    /// Admitted only by a wildcard, but the effect destroys state — see
-    /// [`InfraFacet::admits`].
-    WildcardCannotAuthoriseDestruction { matched: String },
+    /// Admitted only by a wildcard, and the effect is one a wildcard
+    /// does not stretch to — see [`Gravity`] and [`InfraFacet::admits`].
+    WildcardIsNotEnough { matched: String, why: Gravity },
     /// The effect could not be reduced to `provider.service.verb`, so
     /// there is nothing to check it against.
     Unreadable(String),
@@ -121,11 +194,9 @@ impl std::fmt::Display for Denial {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Denial::NotGranted => write!(f, "no allow entry admits it"),
-            Denial::WildcardCannotAuthoriseDestruction { matched } => write!(
-                f,
-                "only `{matched}` admits it, and a wildcard cannot authorise \
-                 destruction of stateful infrastructure — name the verb explicitly"
-            ),
+            Denial::WildcardIsNotEnough { matched, why } => {
+                write!(f, "only `{matched}` admits it, and {}", why.as_reason())
+            }
             Denial::Unreadable(why) => write!(f, "{why}"),
         }
     }
@@ -135,20 +206,21 @@ impl InfraFacet {
     pub fn new(allow: impl IntoIterator<Item = impl Into<String>>) -> Self {
         InfraFacet {
             allow: allow.into_iter().map(Into::into).collect(),
-            scope: Scope::default(),
+            ..InfraFacet::default()
         }
     }
 
-    /// Is `effect` authorised, given whether it destroys state?
+    /// Is `effect` authorised, at the given [`Gravity`]?
     ///
-    /// The destructive case is the one that matters. A grant of
+    /// The non-routine cases are the ones that matter. A grant of
     /// `aws.rds.*` reads to an operator as "manage RDS", not "you may
     /// delete the production database" — so a wildcard admits ordinary
-    /// verbs but never a `delete` or `replace` of something stateful.
-    /// Destroying state requires the verb spelled out. This is the
+    /// verbs but never a `delete` or `replace` of something stateful,
+    /// nor a change nothing has priced. Either requires the verb
+    /// spelled out. This is the
     /// facet's half of "an `IrreversibleConsequential` command is refused
     /// by construction unless the grant bounds it".
-    pub fn admits(&self, effect: &Effect, destroys_state: bool) -> Result<(), Denial> {
+    pub fn admits(&self, effect: &Effect, gravity: Gravity) -> Result<(), Denial> {
         let qualified = effect.qualified();
         let parsed = Pattern::parse(&qualified).ok_or_else(|| {
             Denial::Unreadable(format!(
@@ -166,7 +238,7 @@ impl InfraFacet {
                 continue;
             };
             if pattern.admits(&parsed) {
-                if !destroys_state || !pattern.has_wildcard() {
+                if !gravity.needs_the_verb_named() || !pattern.has_wildcard() {
                     return Ok(());
                 }
                 wildcard_match.get_or_insert_with(|| entry.clone());
@@ -174,7 +246,10 @@ impl InfraFacet {
         }
 
         Err(match wildcard_match {
-            Some(matched) => Denial::WildcardCannotAuthoriseDestruction { matched },
+            Some(matched) => Denial::WildcardIsNotEnough {
+                matched,
+                why: gravity,
+            },
             None => Denial::NotGranted,
         })
     }
@@ -215,6 +290,19 @@ impl Facet for InfraFacet {
                     format!("allow: child claims `{entry}`, which the parent does not grant"),
                 ));
             }
+        }
+
+        // A child may not redenominate its budget: the ceiling is an
+        // integer, so changing the unit changes the ceiling.
+        if !parent.currency.eq_ignore_ascii_case(&child.currency) {
+            return Err(FacetError::new(
+                Self::NAME,
+                format!(
+                    "currency: child denominates its budget in `{}`, parent in `{}` \
+                     — the ceiling is a bare integer, so the unit is part of it",
+                    child.currency, parent.currency
+                ),
+            ));
         }
 
         // Scope narrows: a child may pin an account the parent pinned or
@@ -266,9 +354,11 @@ mod tests {
     #[test]
     fn an_exact_entry_admits_only_that_verb() {
         let f = InfraFacet::new(["aws.iam.read"]);
-        assert!(f.admits(&effect("aws_iam_role", Verb::Read), false).is_ok());
+        assert!(f
+            .admits(&effect("aws_iam_role", Verb::Read), Gravity::Routine)
+            .is_ok());
         assert_eq!(
-            f.admits(&effect("aws_iam_role", Verb::Update), false),
+            f.admits(&effect("aws_iam_role", Verb::Update), Gravity::Routine),
             Err(Denial::NotGranted)
         );
     }
@@ -277,10 +367,10 @@ mod tests {
     fn a_wildcard_admits_ordinary_verbs() {
         let f = InfraFacet::new(["aws.ecs.*"]);
         assert!(f
-            .admits(&effect("aws_ecs_service", Verb::Update), false)
+            .admits(&effect("aws_ecs_service", Verb::Update), Gravity::Routine)
             .is_ok());
         assert!(f
-            .admits(&effect("aws_ecs_service", Verb::Create), false)
+            .admits(&effect("aws_ecs_service", Verb::Create), Gravity::Routine)
             .is_ok());
     }
 
@@ -290,21 +380,55 @@ mod tests {
         let f = InfraFacet::new(["aws.rds.*"]);
         let e = effect("aws_db_instance", Verb::Replace);
         assert_eq!(
-            f.admits(&e, true),
-            Err(Denial::WildcardCannotAuthoriseDestruction {
-                matched: "aws.rds.*".into()
+            f.admits(&e, Gravity::DestroysState),
+            Err(Denial::WildcardIsNotEnough {
+                matched: "aws.rds.*".into(),
+                why: Gravity::DestroysState,
             })
         );
         // Spelled out, it is authorised.
         let explicit = InfraFacet::new(["aws.rds.replace"]);
-        assert!(explicit.admits(&e, true).is_ok());
+        assert!(explicit.admits(&e, Gravity::DestroysState).is_ok());
+    }
+
+    /// The same rule, for the other reason (#4) — and the refusal must
+    /// say which. Telling an operator that creating an ECS service
+    /// destroys stateful infrastructure is a lie they have to spend
+    /// time disproving.
+    #[test]
+    fn an_unpriced_change_is_refused_for_its_own_reason() {
+        let f = InfraFacet::new(["aws.ecs.*"]);
+        let e = effect("aws_ecs_service", Verb::Create);
+
+        assert!(f.admits(&e, Gravity::Routine).is_ok(), "priced, it passes");
+
+        let denial = f.admits(&e, Gravity::Unpriced).unwrap_err();
+        assert_eq!(
+            denial,
+            Denial::WildcardIsNotEnough {
+                matched: "aws.ecs.*".into(),
+                why: Gravity::Unpriced,
+            }
+        );
+        let said = denial.to_string();
+        assert!(said.contains("priced"), "{said}");
+        assert!(
+            !said.contains("destruction"),
+            "a create destroys nothing: {said}"
+        );
+
+        // Naming the verb authorises it unpriced — the operator saying
+        // they accept this one without an estimate.
+        assert!(InfraFacet::new(["aws.ecs.create"])
+            .admits(&e, Gravity::Unpriced)
+            .is_ok());
     }
 
     #[test]
     fn a_wildcard_still_covers_destruction_of_stateless_things() {
         let f = InfraFacet::new(["aws.ecs.*"]);
         assert!(f
-            .admits(&effect("aws_ecs_service", Verb::Delete), false)
+            .admits(&effect("aws_ecs_service", Verb::Delete), Gravity::Routine)
             .is_ok());
     }
 
@@ -313,7 +437,10 @@ mod tests {
         let f = InfraFacet::new(["*.*.*"]);
         // A type with no underscore yields an empty service.
         let e = Effect::new("weird", Verb::Delete, "addr");
-        assert!(matches!(f.admits(&e, true), Err(Denial::Unreadable(_))));
+        assert!(matches!(
+            f.admits(&e, Gravity::DestroysState),
+            Err(Denial::Unreadable(_))
+        ));
     }
 
     #[test]
@@ -322,10 +449,10 @@ mod tests {
         assert_eq!(f.malformed_entries(), vec!["aws.*"]);
         // The two-segment entry admits nothing at all.
         assert!(f
-            .admits(&effect("aws_iam_role", Verb::Update), false)
+            .admits(&effect("aws_iam_role", Verb::Update), Gravity::Routine)
             .is_err());
         assert!(f
-            .admits(&effect("aws_ecs_service", Verb::Update), false)
+            .admits(&effect("aws_ecs_service", Verb::Update), Gravity::Routine)
             .is_ok());
     }
 
@@ -362,6 +489,7 @@ mod tests {
                 account: Some("123456789012".into()),
                 region: vec!["eu-west-1".into(), "eu-west-2".into()],
             },
+            ..InfraFacet::default()
         };
 
         let ok = InfraFacet {
@@ -370,6 +498,7 @@ mod tests {
                 account: Some("123456789012".into()),
                 region: vec!["eu-west-1".into()],
             },
+            ..InfraFacet::default()
         };
         assert!(InfraFacet::validate_narrowing(&parent, &ok).is_ok());
 
@@ -397,6 +526,7 @@ mod tests {
         let unconstrained = InfraFacet {
             allow: vec!["aws.ecs.update".into()],
             scope: Scope::default(),
+            ..InfraFacet::default()
         };
         assert!(InfraFacet::validate_narrowing(&parent, &unconstrained).is_err());
     }

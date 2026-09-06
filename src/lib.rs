@@ -26,6 +26,7 @@
 //! ```
 
 pub mod classify;
+pub mod cost;
 pub mod effect;
 pub mod facet;
 pub mod gate;
@@ -36,8 +37,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub use classify::classify;
+pub use cost::{CostError, CostReport};
 pub use effect::Effect;
-pub use facet::{Denial, InfraFacet, Scope};
+pub use facet::{Denial, Gravity, InfraFacet, Scope};
 pub use gate::{check, Decision, GateError, PlanEvent, Refusal, Verdict, Wall};
 pub use manifest::{infra_facet, narrow, registry};
 pub use plan::{Plan, PlanError, Verb};

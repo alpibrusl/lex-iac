@@ -2,7 +2,8 @@
 //!
 //! ```sh
 //! terraform plan -out=p.tfplan && terraform show -json p.tfplan > plan.json
-//! lex-iac check --grant env.json --plan plan.json
+//! infracost breakdown --path p.tfplan --format json > cost.json
+//! lex-iac check --grant env.json --plan plan.json --cost cost.json
 //! lex-iac manifest narrow --parent org.json --child env.json
 //! ```
 //!
@@ -14,12 +15,16 @@
 
 use std::process::ExitCode;
 
-use lex_iac::{check, infra_facet, narrow, Manifest, Verdict, Wall};
+use lex_iac::{check, infra_facet, narrow, CostReport, Manifest, Verdict, Wall};
 
 const USAGE: &str = "\
 usage:
-  lex-iac check --grant <manifest.json> --plan <plan.json> [--json]
+  lex-iac check --grant <manifest.json> --plan <plan.json> [--cost <cost.json>] [--json]
   lex-iac manifest narrow --parent <manifest.json> --child <manifest.json>
+
+--cost takes an estimator's JSON (Infracost today). Without it the spend
+is unknown, and an unknown price is not a price of zero: creating or
+replacing infrastructure then needs its verb named in the grant.
 
 exit: 0 allowed, 8 refused, 2 could not run";
 
@@ -38,6 +43,14 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// Minor units as a decimal. Integer arithmetic only, matching the
+/// house rule that money never touches a float.
+fn money(minor: i64) -> String {
+    let sign = if minor < 0 { "-" } else { "" };
+    let n = minor.unsigned_abs();
+    format!("{sign}{}.{:02}", n / 100, n % 100)
 }
 
 /// Pull `--name value` out of an argument list.
@@ -98,7 +111,30 @@ fn cmd_check(args: &[&str]) -> ExitCode {
         );
     }
 
-    let decision = match check(&plan_src, &manifest) {
+    let cost = match flag(args, "--cost") {
+        None => None,
+        Some(path) => {
+            let src = match read(path) {
+                Ok(s) => s,
+                Err(c) => return c,
+            };
+            match CostReport::from_infracost_json(&src) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    eprintln!("could not read the cost report {path}: {e}");
+                    return ExitCode::from(2);
+                }
+            }
+        }
+    };
+    if cost.is_none() {
+        eprintln!(
+            "note: no --cost report, so spend is unknown; creating or replacing \
+             infrastructure needs its verb named in the grant"
+        );
+    }
+
+    let decision = match check(&plan_src, &manifest, cost.as_ref()) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("the gate could not run: {e}");
@@ -118,6 +154,15 @@ fn print_human(decision: &lex_iac::Decision, manifest: &Manifest, infra: &lex_ia
     println!("goal:      {}", manifest.goal.description);
     println!("plan:      sha256:{}", decision.plan.plan_sha256);
     println!("grant:     {}", manifest.content_id());
+    match decision.charged {
+        Some(minor) => println!(
+            "spend:     {} {} / month against a ceiling of {} (forecast, not a meter)",
+            infra.currency,
+            money(minor),
+            money(manifest.budget.max_money_cents as i64)
+        ),
+        None => println!("spend:     unpriced — no --cost report"),
+    }
     println!();
 
     match &decision.verdict {
@@ -139,6 +184,22 @@ fn print_human(decision: &lex_iac::Decision, manifest: &Manifest, infra: &lex_ia
             println!("\nthe grant allows:");
             for a in &infra.allow {
                 println!("  {a}");
+            }
+            if all.iter().any(|r| r.wall == Wall::Budget) {
+                // Two different budget refusals want two different
+                // remedies, and offering the wrong one costs the reader
+                // a round trip: raising a ceiling does nothing for a
+                // change nobody has priced.
+                match decision.charged {
+                    Some(_) => println!(
+                        "\nThe budget is a ceiling on *forecast* monthly spend, not a meter.\n\
+                         Raise it in the manifest, or narrow the plan."
+                    ),
+                    None => println!(
+                        "\nNo estimate is not an estimate of zero. Pass --cost with your\n\
+                         estimator's JSON, or name the verb in the grant to accept it unpriced."
+                    ),
+                }
             }
             if all.iter().any(|r| r.wall == Wall::Reversibility) {
                 println!(
@@ -166,6 +227,9 @@ fn print_json(decision: &lex_iac::Decision, manifest: &Manifest, infra: &lex_iac
         "plan_sha256": decision.plan.plan_sha256,
         "manifest": manifest.content_id().0,
         "grant_allows": infra.allow,
+        "currency": infra.currency,
+        "monthly_delta_minor": decision.charged,
+        "budget_minor": manifest.budget.max_money_cents,
         "required_effects": decision.plan.required_effects(),
         "refusals": refusals,
         "audit_head": decision.audit.head(),

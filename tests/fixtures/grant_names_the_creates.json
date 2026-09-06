@@ -1,0 +1,36 @@
+{
+  "goal": {
+    "description": "rotate the payments API deployment, with the creates named",
+    "done_signal": null
+  },
+  "grant": {
+    "filesystem": "ReadOnly",
+    "network": "Allowlist",
+    "exec": "None"
+  },
+  "budget": {
+    "wall_clock_secs": 900,
+    "max_commands": 50,
+    "max_money_cents": 5000,
+    "max_api_calls": 200
+  },
+  "isolation_floor": "Namespace",
+  "egress": [],
+  "actuation": null,
+  "facets": {
+    "infra": {
+      "allow": [
+        "aws.ecs.create",
+        "aws.ecs.update",
+        "aws.cloudwatch.*",
+        "aws.iam.read"
+      ],
+      "scope": {
+        "account": "123456789012",
+        "region": [
+          "eu-west-1"
+        ]
+      }
+    }
+  }
+}

@@ -110,7 +110,7 @@ fn main() {
     //    destroying the database — the reversibility wall, which is a
     //    different question from whether a child may inherit the
     //    pattern.
-    let d = check(ROTATE, &org).expect("the gate runs");
+    let d = check(ROTATE, &org, None).expect("the gate runs");
     let Verdict::Deny { first, .. } = &d.verdict else {
         panic!("expected a refusal, got {:?}", d.verdict);
     };
@@ -130,7 +130,7 @@ fn main() {
         Grant::new(Level::ReadOnly, Level::None, Level::None),
         Budget::research_default(),
     );
-    let d = check(ROTATE, &bare).expect("the gate still runs");
+    let d = check(ROTATE, &bare, None).expect("the gate still runs");
     println!();
     println!("no facet means no infrastructure authority");
     println!(
