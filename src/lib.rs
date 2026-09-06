@@ -27,6 +27,9 @@
 
 pub mod classify;
 pub mod effect;
+pub mod facet;
+pub mod gate;
+pub mod manifest;
 pub mod plan;
 
 use serde::{Deserialize, Serialize};
@@ -34,7 +37,10 @@ use sha2::{Digest, Sha256};
 
 pub use classify::classify;
 pub use effect::Effect;
+pub use facet::{Denial, InfraFacet, Scope};
+pub use gate::{check, Decision, PlanEvent, Refusal, Verdict, Wall};
 pub use lex_os_manifest::Reversibility;
+pub use manifest::InfraManifest;
 pub use plan::{Plan, PlanError, Verb};
 
 /// One resource change, compiled.

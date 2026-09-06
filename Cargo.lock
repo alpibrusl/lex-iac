@@ -296,8 +296,8 @@ dependencies = [
 
 [[package]]
 name = "lex-ast"
-version = "0.9.8"
-source = "git+https://github.com/alpibrusl/lex-lang?rev=ddfd7b78c725681208a865489e82b061777bc60d#ddfd7b78c725681208a865489e82b061777bc60d"
+version = "0.10.15"
+source = "git+https://github.com/alpibrusl/lex-lang?tag=v0.10.15#f2c872fedffd72c4e35d36f1714cae11e826c3df"
 dependencies = [
  "indexmap",
  "lex-syntax",
@@ -312,7 +312,20 @@ name = "lex-iac"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "lex-os-audit",
  "lex-os-manifest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
+name = "lex-os-audit"
+version = "0.1.0"
+source = "git+https://github.com/alpibrusl/lex-os?rev=f7cec3aedd42a607bf7dc2ca7ee70cc2f6f96a00#f7cec3aedd42a607bf7dc2ca7ee70cc2f6f96a00"
+dependencies = [
+ "hex",
  "serde",
  "serde_json",
  "sha2",
@@ -322,7 +335,7 @@ dependencies = [
 [[package]]
 name = "lex-os-manifest"
 version = "0.1.0"
-source = "git+https://github.com/alpibrusl/lex-os?rev=a87416523baae47a1a0cf53a99a646db5ecc4600#a87416523baae47a1a0cf53a99a646db5ecc4600"
+source = "git+https://github.com/alpibrusl/lex-os?rev=f7cec3aedd42a607bf7dc2ca7ee70cc2f6f96a00#f7cec3aedd42a607bf7dc2ca7ee70cc2f6f96a00"
 dependencies = [
  "hex",
  "lex-types",
@@ -334,8 +347,8 @@ dependencies = [
 
 [[package]]
 name = "lex-syntax"
-version = "0.9.8"
-source = "git+https://github.com/alpibrusl/lex-lang?rev=ddfd7b78c725681208a865489e82b061777bc60d#ddfd7b78c725681208a865489e82b061777bc60d"
+version = "0.10.15"
+source = "git+https://github.com/alpibrusl/lex-lang?tag=v0.10.15#f2c872fedffd72c4e35d36f1714cae11e826c3df"
 dependencies = [
  "flate2",
  "indexmap",
@@ -351,8 +364,8 @@ dependencies = [
 
 [[package]]
 name = "lex-types"
-version = "0.9.8"
-source = "git+https://github.com/alpibrusl/lex-lang?rev=ddfd7b78c725681208a865489e82b061777bc60d#ddfd7b78c725681208a865489e82b061777bc60d"
+version = "0.10.15"
+source = "git+https://github.com/alpibrusl/lex-lang?tag=v0.10.15#f2c872fedffd72c4e35d36f1714cae11e826c3df"
 dependencies = [
  "hex",
  "indexmap",
