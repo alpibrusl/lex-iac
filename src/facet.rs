@@ -150,6 +150,17 @@ pub enum Gravity {
     /// must not read as "it is free", so an unpriced create needs the
     /// same explicitness — either an estimate, or the verb named.
     Unpriced,
+    /// The submitter is not in the earned keyring (#1 milestone 4).
+    ///
+    /// The weakest of the three and the broadest: it applies to every
+    /// mutating verb, not only the grave ones. A submitter with no
+    /// track record still acts — it just cannot act through a
+    /// wildcard, so each verb it uses is one somebody wrote down.
+    ///
+    /// Trust *narrows*. Being in the keyring grants nothing extra; it
+    /// only declines to add this escalation. The manifest stays the
+    /// ceiling either way.
+    Untrusted,
 }
 
 impl Gravity {
@@ -172,6 +183,11 @@ impl Gravity {
                 "nothing has priced this change, so a wildcard cannot \
                  authorise it — supply a cost estimate, or name the verb \
                  explicitly"
+            }
+            Gravity::Untrusted => {
+                "the submitter is not in the trusted keyring, so a wildcard \
+                 cannot authorise it — name the verb explicitly, or let the \
+                 submitter earn a score"
             }
         }
     }

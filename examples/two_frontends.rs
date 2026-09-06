@@ -53,7 +53,7 @@ fn main() {
     //    database, in either.
     println!("one grant file, `aws.rds.*`, against both");
     for (tool, src) in [("terraform", TERRAFORM), ("pulumi", PULUMI)] {
-        let d = check(src, &wildcard, None).expect("the gate runs");
+        let d = check(src, &wildcard, None, None).expect("the gate runs");
         match &d.verdict {
             Verdict::Allow => println!("  {tool:<10} ACCEPTED"),
             Verdict::Deny { first, .. } => {
@@ -67,8 +67,8 @@ fn main() {
         }
     }
 
-    let a = check(TERRAFORM, &wildcard, None).unwrap();
-    let b = check(PULUMI, &wildcard, None).unwrap();
+    let a = check(TERRAFORM, &wildcard, None, None).unwrap();
+    let b = check(PULUMI, &wildcard, None, None).unwrap();
     let (Verdict::Deny { first: fa, .. }, Verdict::Deny { first: fb, .. }) =
         (&a.verdict, &b.verdict)
     else {
@@ -82,7 +82,7 @@ fn main() {
     //    only be satisfied on one frontend would not be one gate.
     println!("naming the verb authorises it in both");
     for (tool, src) in [("terraform", TERRAFORM), ("pulumi", PULUMI)] {
-        let d = check(src, &named, None).expect("the gate runs");
+        let d = check(src, &named, None, None).expect("the gate runs");
         println!(
             "  {tool:<10} {}",
             if d.verdict.allowed() {

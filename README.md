@@ -283,7 +283,7 @@ recorded like any other. A facet that is present but *unreadable* is
 different: the gate exits 2 rather than guessing, because neither
 "grants nothing" nor "grants everything" is a safe reading of it.
 
-## The three walls
+## The four walls
 
 **Narrowing.** Every mutating effect must be admitted by the facet.
 Nothing else applies.
@@ -327,6 +327,63 @@ integer: nothing in it says which currency, so ¥5000 is not $50, and a
 child that redenominated its budget would have widened it. A report in
 another currency stops the gate rather than being converted.
 
+**Trust.** A submitter nobody has scored is held to the *narrower*
+reading of the same grant: every mutating verb it uses must be named,
+no wildcards. Pass `--signer` to say who is asking and `--trusted-keys`
+with the keyring `lex producer-trust keyring --min-trust N` writes —
+the identical `{"trusted":[…]}` file `lex-os capsule install` already
+consumes.
+
+```
+aws.ecs.update  [trust]
+  reason: only `aws.ecs.*` admits it, and the submitter is not in the
+          trusted keyring — name the verb explicitly, or let the
+          submitter earn a score
+```
+
+> **Trust narrows; it never widens.**
+
+A score waives nothing the manifest did not already allow. All standing
+decides is whether a wildcard carries this submitter, and the ceiling
+is the manifest either way — a keyring that could admit an effect the
+grant does not would be a second source of authority, which is the one
+thing this project forbids. Three consequences worth stating:
+
+- **Not consulted is not unknown.** Without `--trusted-keys` nothing is
+  consulted and nothing tightens; existing callers are unaffected.
+  "We did not ask" and "we asked and they are not on it" are different
+  facts, and the log records which.
+- **An empty keyring trusts nobody**, the same way an empty allow-list
+  grants nothing. Absent evidence is not evidence of absence.
+- **The narrower grant is still a grant.** An unscored submitter is not
+  locked out; it acts through verbs somebody wrote down.
+
+### Earning it
+
+The keyring is an output of past decisions, not a configuration file:
+
+```sh
+lex-iac check --grant env.json --plan plan.json \
+    --signer ci@payments --audit-out log.json
+
+lex attest import-apply --audit log.json --gate terraform \
+    --accepted plan_accepted --refused plan_refused
+lex producer-trust recompute --tool ci@payments
+lex producer-trust keyring --min-trust 700 --out trusted.json
+```
+
+Both verdicts are promoted, not only acceptances. Producer trust is
+`passed / (passed + failed)`, so importing acceptances alone would
+score every submitter 1.0 for ever and make the signal worthless.
+
+`--audit-out` writes the `{seq, prev_hash, event, hash}` array
+`import-apply` reads. lex-lang knows nothing of this gate's vocabulary,
+so a promotable event carries three fields it *does* name —
+`artifact_sha256`, `manifest` and `signer` — which is why the plan hash
+is spelled `artifact_sha256` in the log while the JSON report still
+calls it `plan_sha256`. Without `--signer` the field is absent rather
+than invented, and `import-apply` asks for its own.
+
 Every check writes `plan_requested` to a hash-chained log **before** any
 wall runs, then `spend_charged` when there is an estimate — whether or
 not it fits, because a budget you can only see once it was exceeded is
@@ -357,7 +414,13 @@ downstream gate would not reimplement tamper-evidence.
    commitments, tiering and usage. A reader who treats this as a meter
    will size the budget wrong. It is also monthly, so a plan that is
    cheap per month and enormous per year passes.
-5. **Narrowing a facet is subsumption; admitting an effect is not.** A
+5. **A keyring cannot tell "never scored" from "scored badly".** Both
+   read as absent, and the gate deliberately does not guess between
+   them — but an operator debugging a refusal will want
+   `lex producer-trust recompute --tool <id>` to find out which. The
+   threshold also lives with whoever exported the keyring, not in the
+   manifest, so two teams can disagree about what 700 means.
+6. **Narrowing a facet is subsumption; admitting an effect is not.** A
    parent granting `aws.rds.*` does let a child inherit
    `aws.rds.delete` — the child is genuinely no wider than its parent.
    Neither manifest thereby authorises destroying a database: that is
