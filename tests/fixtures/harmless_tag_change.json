@@ -1,0 +1,42 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.8",
+  "resource_changes": [
+    {
+      "address": "aws_ecs_service.api",
+      "mode": "managed",
+      "type": "aws_ecs_service",
+      "name": "api",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["update"],
+        "before": { "tags": { "owner": "payments" } },
+        "after": { "tags": { "owner": "payments", "cost-center": "cc-42" } }
+      }
+    },
+    {
+      "address": "aws_cloudwatch_log_group.api",
+      "mode": "managed",
+      "type": "aws_cloudwatch_log_group",
+      "name": "api",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["update"],
+        "before": { "tags": {} },
+        "after": { "tags": { "cost-center": "cc-42" } }
+      }
+    },
+    {
+      "address": "aws_db_instance.payments",
+      "mode": "managed",
+      "type": "aws_db_instance",
+      "name": "payments",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["delete", "create"],
+        "before": { "identifier": "payments-prod", "tags": {} },
+        "after": { "identifier": "payments-prod", "tags": { "cost-center": "cc-42" } }
+      }
+    }
+  ]
+}

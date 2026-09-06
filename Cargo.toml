@@ -1,0 +1,25 @@
+[package]
+name = "lex-iac"
+description = "A capability gate between `terraform plan` and `terraform apply`: compiles a plan to typed effect rows and refuses what the grant does not cover."
+version = "0.1.0"
+edition = "2021"
+license = "EUPL-1.2"
+repository = "https://github.com/alpibrusl/lex-iac"
+homepage = "https://github.com/alpibrusl/lex-iac"
+authors = ["Alpibrupa <https://github.com/alpibrupa>"]
+keywords = ["terraform", "opentofu", "policy", "capability", "lex"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+# `Reversibility` is the shared vocabulary between this gate and lex-os.
+# Depending on it beats redefining a three-variant enum that must not
+# drift: the whole point is that a plan's blast radius is classified the
+# same way a mediated command's is. Pinned to a rev, per the house style
+# for lex-os -> lex-lang.
+lex-os-manifest = { git = "https://github.com/alpibrusl/lex-os", rev = "a87416523baae47a1a0cf53a99a646db5ecc4600" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+hex = "0.4"
+thiserror = "2"
