@@ -1,0 +1,15 @@
+{
+  "format_version": "9.9",
+  "terraform_version": "99.0.0",
+  "some_future_top_level": { "nested": [1, 2, 3] },
+  "resource_changes": [
+    {
+      "address": "aws_ecs_service.api",
+      "mode": "managed",
+      "type": "aws_ecs_service",
+      "name": "api",
+      "future_field": true,
+      "change": { "actions": ["forget"], "before": {}, "after": {} }
+    }
+  ]
+}

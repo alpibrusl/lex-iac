@@ -1,0 +1,194 @@
+//! **lex-iac** — a capability gate between `terraform plan` and
+//! `terraform apply`.
+//!
+//! Infrastructure-as-code already has an effect system. It has no type
+//! checker. This is the type checker's front half: a plan compiles to a
+//! set of typed effect rows, each classified by blast radius, so a later
+//! stage can check them against the grant that authorises the run.
+//!
+//! Milestone 1 (alpibrusl/lex-iac#2) is this compiler and nothing else:
+//! a pure function over plan JSON, no cloud access, no state backend, no
+//! grant checking yet.
+//!
+//! ```
+//! use lex_iac::compile_str;
+//!
+//! let plan = r#"{
+//!   "resource_changes": [
+//!     { "address": "aws_db_instance.main", "type": "aws_db_instance",
+//!       "mode": "managed", "change": { "actions": ["delete", "create"] } }
+//!   ]
+//! }"#;
+//!
+//! let compiled = compile_str(plan).unwrap();
+//! assert_eq!(compiled.rows[0].effect.qualified(), "aws.rds.replace");
+//! assert!(compiled.has_consequential());
+//! ```
+
+pub mod classify;
+pub mod effect;
+pub mod plan;
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+pub use classify::classify;
+pub use effect::Effect;
+pub use lex_os_manifest::Reversibility;
+pub use plan::{Plan, PlanError, Verb};
+
+/// One resource change, compiled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectRow {
+    pub effect: Effect,
+    pub reversibility: Reversibility,
+    /// The plan address, kept alongside the scoped effect so a refusal
+    /// can name the exact line an operator has to look at.
+    pub address: String,
+    /// The raw Terraform type, before the provider/service split.
+    pub resource_type: String,
+    /// True when this build has no opinion about `resource_type`.
+    ///
+    /// Its destruction was already classified consequential; this flag
+    /// exists so a policy can also escalate on *creating* one, and so a
+    /// refusal can distinguish "we classified this" from "we have never
+    /// seen this".
+    pub unknown_type: bool,
+}
+
+/// A whole plan, compiled: the effect rows plus the identity of the
+/// bytes they came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompiledPlan {
+    /// Hex SHA-256 of the exact plan JSON compiled.
+    ///
+    /// An acceptance is only ever an acceptance of *these* bytes. A
+    /// substituted plan must not inherit it — the same rule the capsule
+    /// contract applies to an archive.
+    pub plan_sha256: String,
+    pub terraform_version: String,
+    pub rows: Vec<EffectRow>,
+}
+
+impl CompiledPlan {
+    /// Every distinct `provider.service.verb` this plan needs, sorted.
+    /// This is the set a grant is checked against.
+    pub fn required_effects(&self) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .rows
+            .iter()
+            .filter(|r| r.effect.verb.mutates())
+            .map(|r| r.effect.qualified())
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    }
+
+    /// Rows at the given class, worst-first order being the caller's
+    /// business.
+    pub fn rows_at(&self, class: Reversibility) -> Vec<&EffectRow> {
+        self.rows
+            .iter()
+            .filter(|r| r.reversibility == class)
+            .collect()
+    }
+
+    /// Does anything here destroy state that re-running cannot restore?
+    ///
+    /// `IrreversibleConsequential` is refused by construction unless the
+    /// grant bounds it, so this is the question a gate asks first.
+    pub fn has_consequential(&self) -> bool {
+        self.rows
+            .iter()
+            .any(|r| r.reversibility == Reversibility::IrreversibleConsequential)
+    }
+
+    /// Rows whose resource type this build does not recognise.
+    pub fn unknown_types(&self) -> Vec<&EffectRow> {
+        self.rows.iter().filter(|r| r.unknown_type).collect()
+    }
+}
+
+/// Compile plan JSON to effect rows.
+///
+/// Pure: no network, no filesystem, no cloud credentials. The only
+/// failure mode is JSON that will not parse.
+pub fn compile_str(src: &str) -> Result<CompiledPlan, PlanError> {
+    let plan = Plan::from_json(src)?;
+    Ok(compile(&plan, src))
+}
+
+/// Compile an already-parsed plan, pinning `raw` as the identity of the
+/// bytes. Prefer [`compile_str`] unless you parsed the plan yourself.
+pub fn compile(plan: &Plan, raw: &str) -> CompiledPlan {
+    let rows = plan
+        .resource_changes
+        .iter()
+        .map(|rc| {
+            let verb = Verb::from_actions(&rc.change.actions);
+            EffectRow {
+                effect: Effect::new(&rc.r#type, verb, &rc.address),
+                reversibility: classify(&rc.r#type, verb, &rc.mode),
+                address: rc.address.clone(),
+                resource_type: rc.r#type.clone(),
+                unknown_type: !classify::is_known(&rc.r#type),
+            }
+        })
+        .collect();
+
+    CompiledPlan {
+        plan_sha256: sha256_hex(raw),
+        terraform_version: plan.terraform_version.clone(),
+        rows,
+    }
+}
+
+fn sha256_hex(src: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(src.as_bytes());
+    hex::encode(h.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_plan_hash_pins_the_exact_bytes() {
+        let a = compile_str(r#"{"resource_changes":[]}"#).unwrap();
+        let b = compile_str(r#"{"resource_changes":[] }"#).unwrap();
+        assert_ne!(
+            a.plan_sha256, b.plan_sha256,
+            "a byte difference must change the identity, even when the plans are equivalent"
+        );
+    }
+
+    #[test]
+    fn required_effects_ignores_reads_and_noops() {
+        let plan = r#"{"resource_changes":[
+            {"address":"a","type":"aws_s3_bucket","mode":"managed","change":{"actions":["no-op"]}},
+            {"address":"b","type":"aws_iam_role","mode":"data","change":{"actions":["read"]}},
+            {"address":"c","type":"aws_ecs_service","mode":"managed","change":{"actions":["update"]}}
+        ]}"#;
+        let c = compile_str(plan).unwrap();
+        assert_eq!(c.required_effects(), vec!["aws.ecs.update"]);
+    }
+
+    #[test]
+    fn effects_are_deduplicated() {
+        let plan = r#"{"resource_changes":[
+            {"address":"a","type":"aws_ecs_service","mode":"managed","change":{"actions":["update"]}},
+            {"address":"b","type":"aws_ecs_service","mode":"managed","change":{"actions":["update"]}}
+        ]}"#;
+        let c = compile_str(plan).unwrap();
+        assert_eq!(c.required_effects(), vec!["aws.ecs.update"]);
+    }
+
+    #[test]
+    fn an_empty_plan_needs_no_authority() {
+        let c = compile_str(r#"{"resource_changes":[]}"#).unwrap();
+        assert!(c.required_effects().is_empty());
+        assert!(!c.has_consequential());
+    }
+}

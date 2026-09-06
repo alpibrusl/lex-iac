@@ -1,0 +1,20 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.8",
+  "resource_changes": [
+    {
+      "address": "acme_widget_cluster.main",
+      "mode": "managed",
+      "type": "acme_widget_cluster",
+      "name": "main",
+      "change": { "actions": ["delete"], "before": {}, "after": null }
+    },
+    {
+      "address": "acme_widget_config.main",
+      "mode": "managed",
+      "type": "acme_widget_config",
+      "name": "main",
+      "change": { "actions": ["create"], "before": null, "after": {} }
+    }
+  ]
+}
