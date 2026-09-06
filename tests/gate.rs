@@ -5,8 +5,13 @@
 //! that the grant files are what an operator actually writes. A gate
 //! that works on hand-built structs and not on the file format is not a
 //! gate anyone can use.
+//!
+//! The grant files are lex-os manifests — the same JSON `lex-os run`
+//! takes, carrying one extra facet. That they deserialise through
+//! `Manifest::from_json` with no adapter is the acceptance test for
+//! lex-os#71.
 
-use lex_iac::{check, InfraManifest, Verdict, Wall};
+use lex_iac::{check, narrow, Manifest, Verdict, Wall};
 
 fn fixture(name: &str) -> String {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/");
@@ -14,9 +19,8 @@ fn fixture(name: &str) -> String {
         .unwrap_or_else(|e| panic!("reading fixture {name}: {e}"))
 }
 
-fn manifest(name: &str) -> InfraManifest {
-    InfraManifest::from_json(&fixture(name))
-        .unwrap_or_else(|e| panic!("parsing manifest {name}: {e}"))
+fn manifest(name: &str) -> Manifest {
+    Manifest::from_json(&fixture(name)).unwrap_or_else(|e| panic!("parsing manifest {name}: {e}"))
 }
 
 /// The demo. A plan that reads as three tag edits, under a grant that
@@ -99,7 +103,7 @@ fn an_unreadable_plan_shape_is_refused() {
 fn a_child_manifest_cannot_mint_itself_rds() {
     let parent = manifest("grant_org_parent.json");
     let child = manifest("grant_child_mints_rds.json");
-    let err = InfraManifest::validate_narrowing(&parent, &child).unwrap_err();
+    let err = narrow(&parent, &child).unwrap_err();
     assert!(
         err.to_string().contains("aws.rds.delete"),
         "the refusal should name the entry that widened: {err}"
@@ -150,4 +154,60 @@ fn the_record_pins_the_plan_that_was_checked() {
     .unwrap();
     assert_ne!(a.plan.plan_sha256, b.plan.plan_sha256);
     assert_ne!(a.audit.head(), b.audit.head());
+}
+
+/// A grant file is a lex-os manifest, not a shape of this crate's own.
+/// If that ever stops being true the whole "one manifest, many facets"
+/// claim goes with it, so it is asserted rather than assumed.
+#[test]
+fn a_grant_file_is_a_lex_os_manifest_carrying_one_facet() {
+    let m = manifest("grant_ecs_only.json");
+    assert!(m.has_facet("infra"));
+    assert_eq!(
+        m.goal.description, "rotate the payments API deployment",
+        "the goal is lex-os's `Goal`, not a bare string"
+    );
+    assert_eq!(
+        lex_iac::infra_facet(&m).unwrap().allow,
+        ["aws.ecs.*", "aws.cloudwatch.*", "aws.iam.read"]
+    );
+
+    // The facet folds into the one `ManifestId` the ADR promises: this
+    // manifest is not the same manifest as one granting RDS as well.
+    assert_ne!(
+        m.content_id(),
+        manifest("grant_with_rds_wildcard.json").content_id()
+    );
+}
+
+/// A manifest with no `infra` facet grants no infrastructure authority
+/// — and that is a recorded refusal, not a crash and not a pass.
+#[test]
+fn a_manifest_without_the_facet_refuses_every_change() {
+    let mut m = manifest("grant_ecs_only.json");
+    m.facets.remove("infra");
+
+    let d = check(&fixture("rotate_deployment.json"), &m).unwrap();
+    let Verdict::Deny { first, .. } = &d.verdict else {
+        panic!("expected a refusal, got {:?}", d.verdict);
+    };
+    assert_eq!(first.wall, Wall::Narrowing);
+    assert!(first.grant_allows.is_empty());
+    assert_eq!(d.audit.len(), 2, "refused, and recorded like any decision");
+}
+
+/// ...whereas a facet that is *present* and unreadable is a gate that
+/// cannot run. Neither "grants nothing" nor "grants everything" is a
+/// safe reading of it, so neither is guessed.
+#[test]
+fn an_unreadable_facet_stops_the_gate_rather_than_being_guessed_at() {
+    let mut m = manifest("grant_ecs_only.json");
+    m.facets
+        .insert("infra".into(), serde_json::json!({ "allow": "aws.ecs.*" }));
+
+    let err = check(&fixture("rotate_deployment.json"), &m).unwrap_err();
+    assert!(
+        matches!(err, lex_iac::GateError::Manifest(_)),
+        "expected the gate to refuse to run, got {err}"
+    );
 }

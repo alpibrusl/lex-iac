@@ -1,9 +1,36 @@
 {
-  "goal": "org-wide ceiling",
-  "grant": { "filesystem": "ReadWrite", "network": "Full", "exec": "Sandboxed" },
-  "budget": { "wall_clock_secs": 3600, "max_commands": 500, "max_money_cents": 100000, "max_api_calls": 5000 },
-  "infra": {
-    "allow": ["aws.ecs.*", "aws.cloudwatch.*", "aws.iam.read"],
-    "scope": { "account": "123456789012", "region": ["eu-west-1", "eu-west-2"] }
+  "goal": {
+    "description": "org-wide ceiling",
+    "done_signal": null
+  },
+  "grant": {
+    "filesystem": "ReadWrite",
+    "network": "Full",
+    "exec": "Sandboxed"
+  },
+  "budget": {
+    "wall_clock_secs": 3600,
+    "max_commands": 500,
+    "max_money_cents": 100000,
+    "max_api_calls": 5000
+  },
+  "isolation_floor": "Gvisor",
+  "egress": [],
+  "actuation": null,
+  "facets": {
+    "infra": {
+      "allow": [
+        "aws.ecs.*",
+        "aws.cloudwatch.*",
+        "aws.iam.read"
+      ],
+      "scope": {
+        "account": "123456789012",
+        "region": [
+          "eu-west-1",
+          "eu-west-2"
+        ]
+      }
+    }
   }
 }

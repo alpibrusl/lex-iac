@@ -14,7 +14,7 @@
 
 use std::process::ExitCode;
 
-use lex_iac::{check, InfraManifest, Verdict, Wall};
+use lex_iac::{check, infra_facet, narrow, Manifest, Verdict, Wall};
 
 const USAGE: &str = "\
 usage:
@@ -67,18 +67,31 @@ fn cmd_check(args: &[&str]) -> ExitCode {
         (Err(c), _) | (_, Err(c)) => return c,
     };
 
-    let manifest = match InfraManifest::from_json(&grant_src) {
+    let manifest = match Manifest::from_json(&grant_src) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("could not read the grant manifest {grant_path}: {e}");
             return ExitCode::from(2);
         }
     };
+    let infra = match infra_facet(&manifest) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("could not read the grant manifest {grant_path}: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    if !manifest.has_facet("infra") {
+        eprintln!(
+            "warning: {grant_path} carries no `infra` facet, so it authorises no \
+             infrastructure change at all"
+        );
+    }
 
     // An allow entry that does not parse grants nothing. Say so loudly:
     // an operator who wrote `aws.*` believing it granted something is in
     // a worse position than one who wrote nothing at all.
-    for bad in manifest.infra.malformed_entries() {
+    for bad in infra.malformed_entries() {
         eprintln!(
             "warning: allow entry `{bad}` is not a provider.service.verb pattern \
              and grants nothing"
@@ -88,23 +101,23 @@ fn cmd_check(args: &[&str]) -> ExitCode {
     let decision = match check(&plan_src, &manifest) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("could not read the plan {plan_path}: {e}");
+            eprintln!("the gate could not run: {e}");
             return ExitCode::from(2);
         }
     };
 
     if as_json {
-        print_json(&decision, &manifest);
+        print_json(&decision, &manifest, &infra);
     } else {
-        print_human(&decision, &manifest);
+        print_human(&decision, &manifest, &infra);
     }
     ExitCode::from(decision.exit_code() as u8)
 }
 
-fn print_human(decision: &lex_iac::Decision, manifest: &InfraManifest) {
-    println!("goal:      {}", manifest.goal);
+fn print_human(decision: &lex_iac::Decision, manifest: &Manifest, infra: &lex_iac::InfraFacet) {
+    println!("goal:      {}", manifest.goal.description);
     println!("plan:      sha256:{}", decision.plan.plan_sha256);
-    println!("manifest:  sha256:{}", manifest.content_id());
+    println!("grant:     {}", manifest.content_id());
     println!();
 
     match &decision.verdict {
@@ -124,7 +137,7 @@ fn print_human(decision: &lex_iac::Decision, manifest: &InfraManifest) {
                 println!("    reason: {}", r.reason);
             }
             println!("\nthe grant allows:");
-            for a in &manifest.infra.allow {
+            for a in &infra.allow {
                 println!("  {a}");
             }
             if all.iter().any(|r| r.wall == Wall::Reversibility) {
@@ -143,7 +156,7 @@ fn print_human(decision: &lex_iac::Decision, manifest: &InfraManifest) {
     );
 }
 
-fn print_json(decision: &lex_iac::Decision, manifest: &InfraManifest) {
+fn print_json(decision: &lex_iac::Decision, manifest: &Manifest, infra: &lex_iac::InfraFacet) {
     let refusals = match &decision.verdict {
         Verdict::Allow => Vec::new(),
         Verdict::Deny { all, .. } => all.clone(),
@@ -151,7 +164,8 @@ fn print_json(decision: &lex_iac::Decision, manifest: &InfraManifest) {
     let out = serde_json::json!({
         "refused": !decision.verdict.allowed(),
         "plan_sha256": decision.plan.plan_sha256,
-        "manifest": manifest.content_id(),
+        "manifest": manifest.content_id().0,
+        "grant_allows": infra.allow,
         "required_effects": decision.plan.required_effects(),
         "refusals": refusals,
         "audit_head": decision.audit.head(),
@@ -175,8 +189,8 @@ fn cmd_narrow(args: &[&str]) -> ExitCode {
     };
 
     let (parent, child) = match (
-        InfraManifest::from_json(&parent_src),
-        InfraManifest::from_json(&child_src),
+        Manifest::from_json(&parent_src),
+        Manifest::from_json(&child_src),
     ) {
         (Ok(p), Ok(c)) => (p, c),
         (Err(e), _) => {
@@ -189,11 +203,11 @@ fn cmd_narrow(args: &[&str]) -> ExitCode {
         }
     };
 
-    match InfraManifest::validate_narrowing(&parent, &child) {
+    match narrow(&parent, &child) {
         Ok(()) => {
             println!("ACCEPTED — the child narrows the parent.");
-            println!("  parent: sha256:{}", parent.content_id());
-            println!("  child:  sha256:{}", child.content_id());
+            println!("  parent: {}", parent.content_id());
+            println!("  child:  {}", child.content_id());
             ExitCode::from(0)
         }
         Err(e) => {
