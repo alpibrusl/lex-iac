@@ -37,6 +37,7 @@ fn a_wildcard_grant_refuses_the_hidden_replace() {
         &fixture("harmless_tag_change.json"),
         &manifest("grant_with_rds_wildcard.json"),
         None,
+        None,
     )
     .unwrap();
 
@@ -59,6 +60,7 @@ fn naming_the_verb_in_the_grant_authorises_the_replace() {
         &fixture("harmless_tag_change.json"),
         &manifest("grant_names_the_replace.json"),
         None,
+        None,
     )
     .unwrap();
     assert!(d.verdict.allowed(), "{:?}", d.verdict);
@@ -73,6 +75,7 @@ fn an_unpriced_create_is_not_covered_by_a_wildcard() {
     let d = check(
         &fixture("rotate_deployment.json"),
         &manifest("grant_ecs_only.json"),
+        None,
         None,
     )
     .unwrap();
@@ -101,6 +104,7 @@ fn a_benign_rotation_passes_an_ecs_only_grant_once_it_is_priced() {
         &fixture("rotate_deployment.json"),
         &manifest("grant_ecs_only.json"),
         Some(&cost("cost_rotation.json")),
+        None,
     )
     .unwrap();
     assert!(d.verdict.allowed(), "{:?}", d.verdict);
@@ -112,6 +116,7 @@ fn naming_the_verb_also_authorises_an_unpriced_create() {
     let d = check(
         &fixture("rotate_deployment.json"),
         &manifest("grant_names_the_creates.json"),
+        None,
         None,
     )
     .unwrap();
@@ -126,6 +131,7 @@ fn an_unknown_provider_is_refused_under_a_normal_grant() {
     let d = check(
         &fixture("unknown_provider.json"),
         &manifest("grant_ecs_only.json"),
+        None,
         None,
     )
     .unwrap();
@@ -143,6 +149,7 @@ fn an_unreadable_plan_shape_is_refused() {
     let d = check(
         &fixture("future_shape.json"),
         &manifest("grant_ecs_only.json"),
+        None,
         None,
     )
     .unwrap();
@@ -178,7 +185,7 @@ fn both_outcomes_are_recorded_and_the_chain_verifies() {
             false,
         ),
     ] {
-        let d = check(&fixture(plan), &manifest(grant), None).unwrap();
+        let d = check(&fixture(plan), &manifest(grant), None, None).unwrap();
         assert_eq!(d.verdict.allowed(), expect_allowed);
         assert_eq!(d.audit.len(), 2, "request then decision");
         d.audit
@@ -198,11 +205,13 @@ fn the_record_pins_the_plan_that_was_checked() {
         &fixture("harmless_tag_change.json"),
         &manifest("grant_names_the_replace.json"),
         None,
+        None,
     )
     .unwrap();
     let b = check(
         &fixture("rotate_deployment.json"),
         &manifest("grant_ecs_only.json"),
+        None,
         None,
     )
     .unwrap();
@@ -241,7 +250,7 @@ fn a_manifest_without_the_facet_refuses_every_change() {
     let mut m = manifest("grant_ecs_only.json");
     m.facets.remove("infra");
 
-    let d = check(&fixture("rotate_deployment.json"), &m, None).unwrap();
+    let d = check(&fixture("rotate_deployment.json"), &m, None, None).unwrap();
     let Verdict::Deny { first, .. } = &d.verdict else {
         panic!("expected a refusal, got {:?}", d.verdict);
     };
@@ -259,7 +268,7 @@ fn an_unreadable_facet_stops_the_gate_rather_than_being_guessed_at() {
     m.facets
         .insert("infra".into(), serde_json::json!({ "allow": "aws.ecs.*" }));
 
-    let err = check(&fixture("rotate_deployment.json"), &m, None).unwrap_err();
+    let err = check(&fixture("rotate_deployment.json"), &m, None, None).unwrap_err();
     assert!(
         matches!(err, lex_iac::GateError::Manifest(_)),
         "expected the gate to refuse to run, got {err}"
@@ -274,6 +283,7 @@ fn a_plan_over_the_money_budget_is_refused_and_the_charge_recorded() {
         &fixture("harmless_tag_change.json"),
         &manifest("grant_names_the_replace.json"),
         Some(&cost("cost_over_budget.json")),
+        None,
     )
     .unwrap();
 
@@ -303,6 +313,7 @@ fn the_charge_is_recorded_on_an_approval_too() {
         &fixture("rotate_deployment.json"),
         &manifest("grant_ecs_only.json"),
         Some(&cost("cost_rotation.json")),
+        None,
     )
     .unwrap();
     assert!(d.verdict.allowed());
@@ -318,6 +329,7 @@ fn a_saving_is_never_refused_by_the_budget() {
         &fixture("harmless_tag_change.json"),
         &manifest("grant_names_the_replace.json"),
         Some(&cost("cost_teardown.json")),
+        None,
     )
     .unwrap();
     assert!(d.verdict.allowed(), "{:?}", d.verdict);
@@ -334,6 +346,7 @@ fn a_differently_denominated_estimate_stops_the_gate() {
         &fixture("rotate_deployment.json"),
         &manifest("grant_ecs_only.json"),
         Some(&cost("cost_in_euros.json")),
+        None,
     )
     .unwrap_err();
     assert!(
@@ -372,6 +385,7 @@ fn a_zero_budget_refuses_any_spend() {
         &fixture("rotate_deployment.json"),
         &m,
         Some(&cost("cost_rotation.json")),
+        None,
     )
     .unwrap();
     let Verdict::Deny { first, .. } = &d.verdict else {
@@ -392,7 +406,7 @@ fn a_zero_delta_estimate_is_an_estimate() {
         r#"{"currency":"USD","diffTotalMonthlyCost":"0.00"}"#,
     )
     .unwrap();
-    let d = check(&fixture("rotate_deployment.json"), &m, Some(&free)).unwrap();
+    let d = check(&fixture("rotate_deployment.json"), &m, Some(&free), None).unwrap();
     assert!(d.verdict.allowed(), "{:?}", d.verdict);
     assert_eq!(
         d.charged,
@@ -420,7 +434,7 @@ fn a_document_that_is_not_a_plan_stops_the_gate_rather_than_passing_it() {
         r#"{"Resources":{"db":{"Type":"AWS::RDS::DBInstance"}}}"#,
         "",
     ] {
-        let err = check(not_a_plan, &m, None).unwrap_err();
+        let err = check(not_a_plan, &m, None, None).unwrap_err();
         assert!(
             matches!(err, lex_iac::GateError::Plan(_)),
             "{not_a_plan} must refuse to run, not approve: got {err}"
@@ -429,7 +443,7 @@ fn a_document_that_is_not_a_plan_stops_the_gate_rather_than_passing_it() {
 
     // ...while an explicitly empty plan is a real answer: there is
     // nothing in it to authorise.
-    let d = check(r#"{"resource_changes":[]}"#, &m, None).unwrap();
+    let d = check(r#"{"resource_changes":[]}"#, &m, None, None).unwrap();
     assert!(d.verdict.allowed());
     assert_eq!(d.exit_code(), 0);
 }
@@ -450,7 +464,7 @@ fn a_row_with_no_actions_is_checked_not_skipped() {
     infra.allow = vec!["aws.rds.*".into(), "aws.ecs.*".into()];
     m = m.with_facet(&infra).unwrap();
 
-    let d = check(plan, &m, None).unwrap();
+    let d = check(plan, &m, None, None).unwrap();
     let Verdict::Deny { first, .. } = &d.verdict else {
         panic!("expected a refusal, got {:?}", d.verdict);
     };

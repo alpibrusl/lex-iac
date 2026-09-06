@@ -60,8 +60,8 @@ fn both_frontends_compile_the_same_change_to_the_same_effects() {
 fn the_same_wall_refuses_the_same_overreach_in_both() {
     let grant = manifest("grant_with_rds_wildcard.json");
 
-    let tf = check(&fixture(TERRAFORM), &grant, None).unwrap();
-    let pulumi = check(&fixture(PULUMI), &grant, None).unwrap();
+    let tf = check(&fixture(TERRAFORM), &grant, None, None).unwrap();
+    let pulumi = check(&fixture(PULUMI), &grant, None, None).unwrap();
 
     let (
         Verdict::Deny {
@@ -98,7 +98,7 @@ fn the_same_wall_refuses_the_same_overreach_in_both() {
 fn naming_the_verb_authorises_it_in_both() {
     let grant = manifest("grant_names_the_replace.json");
     for plan in [TERRAFORM, PULUMI] {
-        let d = check(&fixture(plan), &grant, None).unwrap();
+        let d = check(&fixture(plan), &grant, None, None).unwrap();
         assert!(d.verdict.allowed(), "{plan}: {:?}", d.verdict);
         assert_eq!(d.exit_code(), 0);
     }
@@ -109,8 +109,8 @@ fn naming_the_verb_authorises_it_in_both() {
 #[test]
 fn one_grant_file_governs_both_frontends() {
     let grant = manifest("grant_with_rds_wildcard.json");
-    let tf = check(&fixture(TERRAFORM), &grant, None).unwrap();
-    let pulumi = check(&fixture(PULUMI), &grant, None).unwrap();
+    let tf = check(&fixture(TERRAFORM), &grant, None, None).unwrap();
+    let pulumi = check(&fixture(PULUMI), &grant, None, None).unwrap();
 
     let tf_id = tf.audit.entries()[0].clone();
     let pulumi_id = pulumi.audit.entries()[0].clone();
@@ -126,8 +126,8 @@ fn one_grant_file_governs_both_frontends() {
 #[test]
 fn each_frontends_acceptance_pins_its_own_bytes() {
     let grant = manifest("grant_names_the_replace.json");
-    let tf = check(&fixture(TERRAFORM), &grant, None).unwrap();
-    let pulumi = check(&fixture(PULUMI), &grant, None).unwrap();
+    let tf = check(&fixture(TERRAFORM), &grant, None, None).unwrap();
+    let pulumi = check(&fixture(PULUMI), &grant, None, None).unwrap();
 
     assert_ne!(tf.plan.plan_sha256, pulumi.plan.plan_sha256);
     assert_ne!(tf.audit.head(), pulumi.audit.head());
@@ -154,7 +154,7 @@ fn a_document_claiming_to_be_both_is_refused() {
     let both = r#"{"resource_changes":[],"steps":[]}"#;
     assert!(matches!(detect(both), Err(lex_iac::PlanError::Ambiguous)));
 
-    let err = check(both, &manifest("grant_ecs_only.json"), None).unwrap_err();
+    let err = check(both, &manifest("grant_ecs_only.json"), None, None).unwrap_err();
     assert!(
         matches!(err, lex_iac::GateError::Plan(lex_iac::PlanError::Ambiguous)),
         "the gate must not run on it: {err}"

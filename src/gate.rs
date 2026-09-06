@@ -7,6 +7,7 @@
 //!   → reversibility  destroying state needs the verb named
 //!   → spend_charged  the predicted delta, recorded              (#4)
 //!   → budget         the delta must fit `max_money_cents`
+//!   → trust          an unscored submitter names every verb it uses
 //!   → plan_accepted | plan_refused
 //! ```
 //!
@@ -33,40 +34,84 @@ use lex_os_manifest::{Manifest, ManifestError, Reversibility};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    compile_any, cost::CostError, facet::Gravity, manifest::infra_facet, CompiledPlan, CostReport,
-    Denial, EffectRow, InfraFacet, PlanError, Verb,
+    compile_any,
+    cost::CostError,
+    facet::Gravity,
+    manifest::infra_facet,
+    trust::{Standing, Submitter},
+    CompiledPlan, CostReport, Denial, EffectRow, InfraFacet, PlanError, Verb,
 };
 
 /// What this gate records. lex-os knows nothing about any of it — which
 /// is why `Chain<E>` is generic (lex-os#67).
+///
+/// # The promotion contract
+///
+/// `plan_accepted` and `plan_refused` are shaped to satisfy
+/// `lex attest import-apply` (alpibrusl/lex-lang#794), which does not
+/// know this repo's vocabulary and so names three fields of its own:
+/// **`artifact_sha256`** (the decided bytes), **`manifest`** (the
+/// ceiling), and **`signer`** (who authorised it). `subject` is
+/// optional and human-facing.
+///
+/// That is why the plan hash is spelled `artifact_sha256` in the log
+/// while [`CompiledPlan`] still calls its field `plan_sha256`: the
+/// contract name belongs where the contract applies, and nowhere else.
+/// A gate that spelled it `plan_sha256` here would promote nothing —
+/// silently, which is the failure mode worth designing out.
+///
+/// `spend_charged` carries no signer because it is a measurement, not a
+/// decision. Nothing promotes it, and attributing a number to somebody
+/// would imply they chose it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PlanEvent {
-    /// Written before anything is decided. `plan_sha256` is the identity
-    /// of the exact bytes; an acceptance authorises only these.
+    /// Written before anything is decided. `artifact_sha256` is the
+    /// identity of the exact bytes; an acceptance authorises only these.
     PlanRequested {
-        plan_sha256: String,
+        artifact_sha256: String,
         manifest: String,
         goal: String,
         effects: Vec<String>,
+        /// Who submitted it, when the caller said. Absent rather than
+        /// invented: `import-apply` then needs its own `--signer`, and
+        /// being asked for one is better than being handed a guess.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signer: Option<String>,
+        /// What the keyring said — `not-consulted` when none was given.
+        trust: String,
     },
     /// The predicted spend, recorded before the budget wall decides —
     /// so an approval carries the number it was approved against, not
     /// only a refusal.
     SpendCharged {
-        plan_sha256: String,
+        artifact_sha256: String,
         currency: String,
         monthly_delta_minor: i64,
         budget_minor: u64,
     },
     PlanAccepted {
-        plan_sha256: String,
+        artifact_sha256: String,
         manifest: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signer: Option<String>,
+        /// The goal this plan was approved in service of. `subject` is
+        /// the contract's optional human-facing field.
+        subject: String,
     },
     /// Refused, naming the single effect that tripped the wall — the
     /// operator needs one line to look at, not a verdict on the plan.
+    ///
+    /// `reason` doubles as the contract's failure detail: `import-apply`
+    /// reads it into `AttestationResult::Failed { detail }`, so a
+    /// submitter's record says *why* it was refused, not merely that it
+    /// was.
     PlanRefused {
-        plan_sha256: String,
+        artifact_sha256: String,
+        manifest: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signer: Option<String>,
+        subject: String,
         wall: String,
         effect: String,
         address: String,
@@ -113,6 +158,9 @@ pub enum Wall {
     Reversibility,
     /// The predicted spend exceeds `budget.max_money_cents`.
     Budget,
+    /// A wildcard would have admitted it, but the submitter has no
+    /// earned standing, so the verb has to be named.
+    Trust,
     /// The gate could not read the effect well enough to check it.
     Unreadable,
 }
@@ -123,6 +171,7 @@ impl Wall {
             Wall::Narrowing => "narrowing",
             Wall::Reversibility => "reversibility",
             Wall::Budget => "budget",
+            Wall::Trust => "trust",
             Wall::Unreadable => "unreadable",
         }
     }
@@ -169,6 +218,10 @@ pub struct Decision {
     /// The predicted monthly delta in minor units, when an estimate was
     /// supplied. `None` means *unpriced*, never zero.
     pub charged: Option<i64>,
+    /// Who asked, if anyone said.
+    pub signer: Option<String>,
+    /// What the keyring said about them.
+    pub standing: Standing,
 }
 
 impl Decision {
@@ -192,6 +245,15 @@ impl Decision {
 /// and an unknown price is treated as consequential — a wildcard will
 /// not authorise it, the verb has to be named. See [`unpriced`].
 ///
+/// `submitter` is who is asking, and what the earned keyring says
+/// about them. It is an `Option` for the same reason `cost` is: a run
+/// with no submitter identity and a run by somebody nobody has scored
+/// are different, and the gate will not pick one for you. Supplying a
+/// submitter with [`Standing::Unknown`](crate::trust::Standing::Unknown)
+/// holds every mutating row to the **narrower** reading of the same
+/// grant — each verb named, no wildcards. It never widens anything; the
+/// manifest is the ceiling regardless of anyone's score.
+///
 /// The only errors are inputs the gate cannot read; a plan that parses
 /// but over-reaches is a `Deny`, not an `Err`. That distinction
 /// matters: a refusal is a normal, recorded outcome, and conflating it
@@ -200,6 +262,7 @@ pub fn check(
     plan_json: &str,
     manifest: &Manifest,
     cost: Option<&CostReport>,
+    submitter: Option<&Submitter>,
 ) -> Result<Decision, GateError> {
     // The one line milestone 5 changed in the gate: which reader runs.
     // Everything downstream — the walls, the facet, the audit vocabulary
@@ -215,20 +278,28 @@ pub fn check(
 
     let mut audit: Chain<PlanEvent> = Chain::new();
     let manifest_id = manifest.content_id().0;
+    let signer = submitter.map(|s| s.signer.clone());
+    let standing = submitter.map_or(Standing::NotConsulted, |s| s.standing);
+    let subject = manifest.goal.description.clone();
 
-    // Logged before any gate runs.
+    // Logged before any gate runs — including who asked and what the
+    // keyring said, so a refusal for want of standing is as legible in
+    // the record as the decision that followed it.
     audit.append(PlanEvent::PlanRequested {
-        plan_sha256: plan.plan_sha256.clone(),
+        artifact_sha256: plan.plan_sha256.clone(),
         manifest: manifest_id.clone(),
-        goal: manifest.goal.description.clone(),
+        goal: subject.clone(),
         effects: plan.required_effects(),
+        signer: signer.clone(),
+        trust: standing.as_str().to_string(),
     });
 
+    let untrusted = standing.needs_the_verb_named();
     let mut refusals: Vec<Refusal> = plan
         .rows
         .iter()
         .filter(|row| row.effect.verb.mutates())
-        .filter_map(|row| refuse(row, &infra, cost.is_some()))
+        .filter_map(|row| refuse(row, &infra, cost.is_some(), untrusted))
         .collect();
 
     // The budget leg: after reversibility, before allow. Recorded
@@ -237,7 +308,7 @@ pub fn check(
     if let Some(c) = cost {
         let budget = manifest.budget.max_money_cents;
         audit.append(PlanEvent::SpendCharged {
-            plan_sha256: plan.plan_sha256.clone(),
+            artifact_sha256: plan.plan_sha256.clone(),
             currency: infra.currency.clone(),
             monthly_delta_minor: c.monthly_delta_minor,
             budget_minor: budget,
@@ -250,14 +321,19 @@ pub fn check(
     let verdict = match refusals.split_first() {
         None => {
             audit.append(PlanEvent::PlanAccepted {
-                plan_sha256: plan.plan_sha256.clone(),
+                artifact_sha256: plan.plan_sha256.clone(),
                 manifest: manifest_id,
+                signer: signer.clone(),
+                subject: subject.clone(),
             });
             Verdict::Allow
         }
         Some((first, _)) => {
             audit.append(PlanEvent::PlanRefused {
-                plan_sha256: plan.plan_sha256.clone(),
+                artifact_sha256: plan.plan_sha256.clone(),
+                manifest: manifest_id,
+                signer: signer.clone(),
+                subject: subject.clone(),
                 wall: first.wall.as_str().to_string(),
                 effect: first.effect.clone(),
                 address: first.address.clone(),
@@ -275,6 +351,8 @@ pub fn check(
         plan,
         audit,
         charged: cost.map(|c| c.monthly_delta_minor),
+        signer,
+        standing,
     })
 }
 
@@ -327,17 +405,25 @@ fn money(minor: i64) -> String {
 }
 
 /// Is this row refused, and why?
-fn refuse(row: &EffectRow, infra: &InfraFacet, priced: bool) -> Option<Refusal> {
-    // Two reasons a wildcard will not do, and they are kept apart:
+fn refuse(row: &EffectRow, infra: &InfraFacet, priced: bool, untrusted: bool) -> Option<Refusal> {
+    // Three reasons a wildcard will not do, and they are kept apart:
     // destroying state is not the same as nobody having priced the
-    // change, and an operator told their `aws.ecs.create` "destroys
+    // change, which is not the same as nobody vouching for the
+    // submitter. An operator told their `aws.ecs.create` "destroys
     // stateful infrastructure" loses the time it takes to find out it
-    // does not. Destruction wins when both apply — it is the graver of
-    // the two, and the one an estimate would not resolve.
+    // does not.
+    //
+    // The order is gravest first, and each remedy is different:
+    // destruction is resolved by naming the verb, an unpriced change
+    // also by supplying an estimate, and an unknown submitter also by
+    // earning a score. Reporting the weakest reason when a graver one
+    // applies would send the reader to the wrong remedy.
     let gravity = if row.reversibility == Reversibility::IrreversibleConsequential {
         Gravity::DestroysState
     } else if !priced && unpriced(row.effect.verb) {
         Gravity::Unpriced
+    } else if untrusted {
+        Gravity::Untrusted
     } else {
         Gravity::Routine
     };
@@ -350,6 +436,10 @@ fn refuse(row: &EffectRow, infra: &InfraFacet, priced: bool) -> Option<Refusal> 
                     why: Gravity::Unpriced,
                     ..
                 } => Wall::Budget,
+                Denial::WildcardIsNotEnough {
+                    why: Gravity::Untrusted,
+                    ..
+                } => Wall::Trust,
                 Denial::WildcardIsNotEnough { .. } => Wall::Reversibility,
                 Denial::Unreadable(_) => Wall::Unreadable,
             };
@@ -393,7 +483,7 @@ mod tests {
 
     #[test]
     fn an_in_grant_plan_is_allowed_and_recorded() {
-        let d = check(ROTATE, &manifest(&["aws.ecs.*"]), None).unwrap();
+        let d = check(ROTATE, &manifest(&["aws.ecs.*"]), None, None).unwrap();
         assert!(d.verdict.allowed());
         assert_eq!(d.exit_code(), 0);
         assert_eq!(d.audit.len(), 2);
@@ -404,7 +494,13 @@ mod tests {
     /// destroying a database.
     #[test]
     fn a_wildcard_grant_does_not_authorise_the_hidden_replace() {
-        let d = check(REPLACE_DB, &manifest(&["aws.ecs.*", "aws.rds.*"]), None).unwrap();
+        let d = check(
+            REPLACE_DB,
+            &manifest(&["aws.ecs.*", "aws.rds.*"]),
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(d.exit_code(), 8);
         let Verdict::Deny { first, .. } = &d.verdict else {
             panic!("expected a refusal, got {:?}", d.verdict);
@@ -421,6 +517,7 @@ mod tests {
             REPLACE_DB,
             &manifest(&["aws.ecs.*", "aws.rds.replace"]),
             None,
+            None,
         )
         .unwrap();
         assert!(d.verdict.allowed(), "{:?}", d.verdict);
@@ -428,7 +525,7 @@ mod tests {
 
     #[test]
     fn an_effect_outside_the_grant_hits_the_narrowing_wall() {
-        let d = check(ROTATE, &manifest(&["aws.iam.read"]), None).unwrap();
+        let d = check(ROTATE, &manifest(&["aws.iam.read"]), None, None).unwrap();
         let Verdict::Deny { first, .. } = &d.verdict else {
             panic!("expected a refusal");
         };
@@ -440,7 +537,7 @@ mod tests {
     /// less legible than an approval.
     #[test]
     fn the_request_is_logged_before_the_decision() {
-        let d = check(REPLACE_DB, &manifest(&["aws.ecs.*"]), None).unwrap();
+        let d = check(REPLACE_DB, &manifest(&["aws.ecs.*"]), None, None).unwrap();
         assert_eq!(d.audit.len(), 2);
         assert!(matches!(
             d.audit.entries()[0].event,
@@ -456,7 +553,7 @@ mod tests {
     #[test]
     fn every_refusal_is_carried_not_just_the_first() {
         // Neither effect is granted.
-        let d = check(REPLACE_DB, &manifest(&["gcp.sql.create"]), None).unwrap();
+        let d = check(REPLACE_DB, &manifest(&["gcp.sql.create"]), None, None).unwrap();
         let Verdict::Deny { all, .. } = &d.verdict else {
             panic!("expected a refusal");
         };
@@ -465,24 +562,27 @@ mod tests {
 
     #[test]
     fn an_empty_plan_is_allowed() {
-        let d = check(r#"{"resource_changes":[]}"#, &manifest(&[]), None).unwrap();
+        let d = check(r#"{"resource_changes":[]}"#, &manifest(&[]), None, None).unwrap();
         assert!(d.verdict.allowed());
     }
 
     #[test]
     fn a_malformed_plan_is_an_error_not_a_verdict() {
-        assert!(check("{not json", &manifest(&["aws.ecs.*"]), None).is_err());
+        assert!(check("{not json", &manifest(&["aws.ecs.*"]), None, None).is_err());
     }
 
     /// A refusal pins the same bytes the request did, so an accepted
     /// plan cannot be swapped for another after the fact.
     #[test]
     fn the_audit_record_pins_the_plan_bytes() {
-        let d = check(ROTATE, &manifest(&["aws.ecs.*"]), None).unwrap();
-        let PlanEvent::PlanRequested { plan_sha256, .. } = &d.audit.entries()[0].event else {
+        let d = check(ROTATE, &manifest(&["aws.ecs.*"]), None, None).unwrap();
+        let PlanEvent::PlanRequested {
+            artifact_sha256, ..
+        } = &d.audit.entries()[0].event
+        else {
             panic!("expected plan_requested");
         };
-        assert_eq!(plan_sha256, &d.plan.plan_sha256);
-        assert_eq!(plan_sha256.len(), 64);
+        assert_eq!(artifact_sha256, &d.plan.plan_sha256);
+        assert_eq!(artifact_sha256.len(), 64);
     }
 }

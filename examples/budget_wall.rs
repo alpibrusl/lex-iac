@@ -87,7 +87,7 @@ fn main() {
 
     // 1. Over the ceiling. The refusal names the resource that
     //    dominates the delta, not just the total.
-    let d = check(PLAN, &grant(5_000), Some(&report(EXPENSIVE))).unwrap();
+    let d = check(PLAN, &grant(5_000), Some(&report(EXPENSIVE)), None).unwrap();
     let Verdict::Deny { first, all } = &d.verdict else {
         panic!("expected a refusal, got {:?}", d.verdict);
     };
@@ -99,7 +99,7 @@ fn main() {
     assert_eq!(first.wall, Wall::Budget);
 
     // 2. The same plan under a ceiling that accommodates it.
-    let d = check(PLAN, &grant(50_000), Some(&report(EXPENSIVE))).unwrap();
+    let d = check(PLAN, &grant(50_000), Some(&report(EXPENSIVE)), None).unwrap();
     println!();
     println!("...and against a $500.00 ceiling");
     println!("  allowed:     {}", d.verdict.allowed());
@@ -116,7 +116,7 @@ fn main() {
     // 3. A saving is not a spend. Charging a teardown against the
     //    budget would refuse exactly the changes an operator most wants
     //    to make.
-    let d = check(PLAN, &grant(5_000), Some(&report(TEARDOWN))).unwrap();
+    let d = check(PLAN, &grant(5_000), Some(&report(TEARDOWN)), None).unwrap();
     println!();
     println!("a teardown is a saving, not a spend");
     println!("  charged:     {}", money(d.charged.unwrap()));
@@ -144,8 +144,8 @@ fn main() {
          "change":{"actions":["create"]}}
     ]}"#;
 
-    let priced = check(ECS_ONLY, &wildcard, Some(&report(CHEAP))).unwrap();
-    let unpriced = check(ECS_ONLY, &wildcard, None).unwrap();
+    let priced = check(ECS_ONLY, &wildcard, Some(&report(CHEAP)), None).unwrap();
+    let unpriced = check(ECS_ONLY, &wildcard, None, None).unwrap();
     println!("  charged, unpriced:   {:?}", unpriced.charged);
     println!("  with an estimate:    {}", priced.verdict.allowed());
     println!("  without one:         {}", unpriced.verdict.allowed());
@@ -166,7 +166,7 @@ fn main() {
 
     // Naming the verb is the other way out: the operator saying, in the
     // grant, that they accept this one unpriced.
-    let named = check(PLAN, &grant(5_000), None).unwrap();
+    let named = check(PLAN, &grant(5_000), None, None).unwrap();
     println!("  ...or name the verb: {}", named.verdict.allowed());
     assert!(named.verdict.allowed());
 }

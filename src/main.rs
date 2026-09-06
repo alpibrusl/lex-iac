@@ -3,9 +3,15 @@
 //! ```sh
 //! terraform plan -out=p.tfplan && terraform show -json p.tfplan > plan.json
 //! infracost breakdown --path p.tfplan --format json > cost.json
-//! lex-iac check --grant env.json --plan plan.json --cost cost.json
+//! lex-iac check --grant env.json --plan plan.json --cost cost.json \
+//!     --signer ci@payments --trusted-keys trusted.json --audit-out log.json
 //! lex-iac manifest narrow --parent org.json --child env.json
 //! ```
+//!
+//! `--audit-out` is what makes a decision outlive the process: the file
+//! is the `{seq, prev_hash, event, hash}` array `lex attest
+//! import-apply` promotes into the attestation graph, which is where
+//! `trusted.json` above comes from in the first place.
 //!
 //! Exit codes follow lex-os: `0` allowed, `8` refused, `2` the gate
 //! could not run (bad usage, unreadable file). The distinction between
@@ -15,16 +21,31 @@
 
 use std::process::ExitCode;
 
-use lex_iac::{check, infra_facet, narrow, CostReport, Manifest, Verdict, Wall};
+use lex_iac::{
+    check, infra_facet, narrow, CostReport, Keyring, Manifest, Standing, Submitter, Verdict, Wall,
+};
 
 const USAGE: &str = "\
 usage:
-  lex-iac check --grant <manifest.json> --plan <plan.json> [--cost <cost.json>] [--json]
+  lex-iac check --grant <manifest.json> --plan <plan.json> [--cost <cost.json>]
+                [--signer <id>] [--trusted-keys <keyring.json>]
+                [--audit-out <log.json>] [--json]
   lex-iac manifest narrow --parent <manifest.json> --child <manifest.json>
 
 --cost takes an estimator's JSON (Infracost today). Without it the spend
 is unknown, and an unknown price is not a price of zero: creating or
 replacing infrastructure then needs its verb named in the grant.
+
+--signer names who submitted the plan; it is recorded in the audit log so
+the decision can be promoted with `lex attest import-apply`.
+
+--trusted-keys takes the `{\"trusted\":[...]}` keyring written by
+`lex producer-trust keyring --min-trust N`. A submitter that is not on it
+is held to the narrower reading of the same grant: every mutating verb
+named, no wildcards. It never widens the grant.
+
+--audit-out writes the hash-chained decision log, which is the input to
+`lex attest import-apply`.
 
 exit: 0 allowed, 8 refused, 2 could not run";
 
@@ -134,13 +155,71 @@ fn cmd_check(args: &[&str]) -> ExitCode {
         );
     }
 
-    let decision = match check(&plan_src, &manifest, cost.as_ref()) {
+    // Who is asking, and what their record says. Consulting a keyring
+    // about nobody is a usage error rather than a silent no-op: a
+    // pipeline that meant to check trust and quietly did not is worse
+    // off than one told to name its submitter.
+    let submitter = match (flag(args, "--signer"), flag(args, "--trusted-keys")) {
+        (None, Some(_)) => {
+            eprintln!("--trusted-keys needs --signer: a keyring says nothing about an unnamed submitter\n\n{USAGE}");
+            return ExitCode::from(2);
+        }
+        (None, None) => {
+            eprintln!(
+                "note: no --signer, so the audit log attributes this decision to nobody; \
+                 `lex attest import-apply` will need its own --signer to promote it"
+            );
+            None
+        }
+        (Some(signer), None) => Some(Submitter::unconsulted(signer)),
+        (Some(signer), Some(path)) => {
+            let src = match read(path) {
+                Ok(s) => s,
+                Err(c) => return c,
+            };
+            let keyring = match Keyring::from_json(&src) {
+                Ok(k) => k,
+                Err(e) => {
+                    eprintln!("could not read the keyring {path}: {e}");
+                    return ExitCode::from(2);
+                }
+            };
+            if keyring.trusted.is_empty() {
+                eprintln!(
+                    "warning: {path} trusts nobody, so every submitter is held to the \
+                     narrower grant"
+                );
+            }
+            Some(Submitter::against(signer, &keyring))
+        }
+    };
+
+    let decision = match check(&plan_src, &manifest, cost.as_ref(), submitter.as_ref()) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("the gate could not run: {e}");
             return ExitCode::from(2);
         }
     };
+
+    // Written before the verdict is printed and before the exit code is
+    // returned: a decision the operator can see but not keep is not a
+    // record. A log that cannot be written is a failure of the gate
+    // (exit 2), never a quiet success — the whole promotion loop
+    // downstream reads this file.
+    if let Some(path) = flag(args, "--audit-out") {
+        let json = match decision.audit.to_json() {
+            Ok(j) => j,
+            Err(e) => {
+                eprintln!("could not serialise the audit log: {e}");
+                return ExitCode::from(2);
+            }
+        };
+        if let Err(e) = std::fs::write(path, json) {
+            eprintln!("could not write the audit log {path}: {e}");
+            return ExitCode::from(2);
+        }
+    }
 
     if as_json {
         print_json(&decision, &manifest, &infra);
@@ -162,6 +241,14 @@ fn print_human(decision: &lex_iac::Decision, manifest: &Manifest, infra: &lex_ia
             money(manifest.budget.max_money_cents as i64)
         ),
         None => println!("spend:     unpriced — no --cost report"),
+    }
+    match (&decision.signer, decision.standing) {
+        (None, _) => println!("submitter: unattributed"),
+        (Some(s), Standing::NotConsulted) => println!("submitter: {s} (trust not consulted)"),
+        (Some(s), Standing::Trusted) => println!("submitter: {s} (in the trusted keyring)"),
+        (Some(s), Standing::Unknown) => {
+            println!("submitter: {s} (not in the trusted keyring — held to the narrower grant)")
+        }
     }
     println!();
 
@@ -207,6 +294,17 @@ fn print_human(decision: &lex_iac::Decision, manifest: &Manifest, infra: &lex_ia
                      Name the verb in the grant if that is genuinely intended."
                 );
             }
+            if all.iter().any(|r| r.wall == Wall::Trust) {
+                // The remedy that is *not* offered here: widening the
+                // grant to get past it. Naming the verb is narrower
+                // than the wildcard already granted, and earning a
+                // score changes nothing about the ceiling.
+                println!(
+                    "\nThis submitter has no earned standing, so a wildcard does not carry it.\n\
+                     Name the verbs in the grant, or promote its past decisions\n\
+                     (`lex attest import-apply`) so it can score above your threshold."
+                );
+            }
         }
     }
 
@@ -224,7 +322,12 @@ fn print_json(decision: &lex_iac::Decision, manifest: &Manifest, infra: &lex_iac
     };
     let out = serde_json::json!({
         "refused": !decision.verdict.allowed(),
+        // The report's own name for the hash. The audit log spells the
+        // same value `artifact_sha256`, because that is what the
+        // promotion contract calls it — see `gate::PlanEvent`.
         "plan_sha256": decision.plan.plan_sha256,
+        "signer": decision.signer,
+        "trust": decision.standing.as_str(),
         "manifest": manifest.content_id().0,
         "grant_allows": infra.allow,
         "currency": infra.currency,

@@ -34,6 +34,7 @@ pub mod manifest;
 pub mod plan;
 pub mod pulumi;
 pub mod resource;
+pub mod trust;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -46,6 +47,7 @@ pub use gate::{check, Decision, GateError, PlanEvent, Refusal, Verdict, Wall};
 pub use manifest::{infra_facet, narrow, registry};
 pub use plan::{Plan, PlanError, Verb};
 pub use resource::ResourceKey;
+pub use trust::{Keyring, Standing, Submitter, TrustError};
 
 /// The manifest a run is authorised by is lex-os's, not this crate's.
 /// Re-exported so a consumer needs one dependency, not two, and so the
