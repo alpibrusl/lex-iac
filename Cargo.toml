@@ -16,7 +16,12 @@ categories = ["command-line-utilities", "development-tools"]
 # drift: the whole point is that a plan's blast radius is classified the
 # same way a mediated command's is. Pinned to a rev, per the house style
 # for lex-os -> lex-lang.
-lex-os-manifest = { git = "https://github.com/alpibrusl/lex-os", rev = "a87416523baae47a1a0cf53a99a646db5ecc4600" }
+lex-os-manifest = { git = "https://github.com/alpibrusl/lex-os", rev = "f7cec3aedd42a607bf7dc2ca7ee70cc2f6f96a00" }
+# The tamper-evident chain, carrying this gate's own vocabulary. lex-os
+# made `Chain<E>` generic (lex-os#67) precisely so a downstream gate does
+# not reimplement it — three hash chains is three chances to get one
+# subtly wrong.
+lex-os-audit = { git = "https://github.com/alpibrusl/lex-os", rev = "f7cec3aedd42a607bf7dc2ca7ee70cc2f6f96a00" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
