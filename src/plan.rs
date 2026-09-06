@@ -96,6 +96,15 @@ pub enum PlanError {
          will not approve what it cannot read"
     )]
     NotAPlan,
+    /// The document declares both a Terraform `resource_changes` and a
+    /// Pulumi `steps`. Picking one would mean deciding, on a coin
+    /// flip, which half of a document to enforce — so neither is
+    /// enforced. Refuse, don't downgrade.
+    #[error(
+        "ambiguous plan: the document carries both `resource_changes` (Terraform) and \
+         `steps` (Pulumi), and this gate will not guess which one governs"
+    )]
+    Ambiguous,
 }
 
 impl Plan {

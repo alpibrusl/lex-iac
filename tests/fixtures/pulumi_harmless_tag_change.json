@@ -1,0 +1,34 @@
+{
+  "steps": [
+    {
+      "op": "update",
+      "urn": "urn:pulumi:prod::payments::aws:ecs/service:Service::api",
+      "oldState": { "type": "aws:ecs/service:Service", "urn": "urn:pulumi:prod::payments::aws:ecs/service:Service::api" },
+      "newState": { "type": "aws:ecs/service:Service", "urn": "urn:pulumi:prod::payments::aws:ecs/service:Service::api" }
+    },
+    {
+      "op": "update",
+      "urn": "urn:pulumi:prod::payments::aws:cloudwatch/logGroup:LogGroup::api",
+      "oldState": { "type": "aws:cloudwatch/logGroup:LogGroup" },
+      "newState": { "type": "aws:cloudwatch/logGroup:LogGroup" }
+    },
+    {
+      "op": "replace",
+      "urn": "urn:pulumi:prod::payments::aws:rds/instance:Instance::payments",
+      "oldState": { "type": "aws:rds/instance:Instance" },
+      "newState": { "type": "aws:rds/instance:Instance" }
+    },
+    {
+      "op": "create-replacement",
+      "urn": "urn:pulumi:prod::payments::aws:rds/instance:Instance::payments",
+      "newState": { "type": "aws:rds/instance:Instance" }
+    },
+    {
+      "op": "delete-replaced",
+      "urn": "urn:pulumi:prod::payments::aws:rds/instance:Instance::payments",
+      "oldState": { "type": "aws:rds/instance:Instance" }
+    }
+  ],
+  "changeSummary": { "update": 2, "replace": 1 },
+  "duration": 3
+}

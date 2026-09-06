@@ -102,9 +102,20 @@ terraform plan -out=p.tfplan && terraform show -json p.tfplan > plan.json
 infracost breakdown --path p.tfplan --format json > cost.json
 
 cargo run -- check --grant env.json --plan plan.json --cost cost.json   # exit 0 or 8
+```
+
+Or on a Pulumi stack — same grant file, same command:
+
+```sh
+pulumi preview --json > preview.json
+cargo run -- check --grant env.json --plan preview.json
+```
+
+```sh
 cargo run --example compile_plan -- plan.json            # just the effect rows
 cargo run --example one_manifest                         # the manifest, end to end
 cargo run --example budget_wall                          # the budget, end to end
+cargo run --example two_frontends                        # Terraform and Pulumi, side by side
 ```
 
 Exit codes follow lex-os: `0` allowed, `8` refused, `2` the gate could
@@ -122,7 +133,7 @@ as a no-op.
 
 ## Where this is
 
-**Milestones 1–3 of [#1](https://github.com/alpibrusl/lex-iac/issues/1).**
+**Milestones 1–3 and 5 of [#1](https://github.com/alpibrusl/lex-iac/issues/1).**
 The plan compiles to effect rows ([#2](https://github.com/alpibrusl/lex-iac/issues/2)),
 the gate checks them against a grant, refusing what it does not
 cover ([#3](https://github.com/alpibrusl/lex-iac/issues/3)), and forecast
@@ -133,6 +144,9 @@ A grant file is a `lex_os_manifest::Manifest` — one manifest, one
 `ManifestId`, one narrowing wall, with `infra` as a facet on it. That
 was the acceptance test for
 [lex-os#71](https://github.com/alpibrusl/lex-os/issues/71).
+
+Two frontends, one gate: Terraform/OpenTofu plan JSON and
+`pulumi preview --json` ([#10](https://github.com/alpibrusl/lex-iac/issues/10)).
 
 Not yet here: attestation, and running the apply itself inside a
 perimeter.
@@ -161,6 +175,49 @@ Three classes carry reversibility, reusing `lex-os-manifest`'s
 "Stateful" comes from a small table (databases, buckets, volumes, KMS
 keys, DNS zones) — the same idea as the `Reversibility` enum, not a
 per-provider plugin system.
+
+### Two frontends, and what that cost
+
+The epic claimed the effect model was not Terraform-shaped. Adding
+Pulumi ([#10](https://github.com/alpibrusl/lex-iac/issues/10)) tested
+that, and the honest answer is *mostly*.
+
+**What survived unchanged:** `provider.service.verb`, `check`, the
+`infra` facet, and the grant file format. One grant governs both tools,
+and the refusal for the same overreach is identical word for word —
+there is a test asserting exactly that. Better, Pulumi arrives at
+`aws.rds.replace` from the *opposite direction*: its types name the
+service outright, where Terraform's `aws_db_instance` needed the
+`("aws","db") => "rds"` alias. Two spellings meeting on one effect is
+the actual evidence the vocabulary is not an artifact of Terraform.
+
+**What did not:** the classification tables were lists of Terraform type
+strings, so every Pulumi type missed. Left alone, every Pulumi teardown
+would have classified `IrreversibleConsequential` — safe, and useless,
+since a gate that refuses every delete whatever the grant says is one
+operators route around. They key on `provider.service.kind` now:
+
+```
+aws_db_instance              ─┐
+                              ├─→  aws.rds.instance
+aws:rds/instance:Instance    ─┘
+```
+
+The kind is part of the key because service granularity is wrong in the
+dangerous direction: `aws.s3.bucket` holds data and
+`aws.s3.bucketpolicy` does not.
+
+**Pulumi spells a replacement three ways** — `replace`, plus
+`create-replacement` and `delete-replaced` for the same URN. Steps fold
+per URN with the worst verb winning, which is the same collapse
+`["delete","create"]` already gets on the Terraform side, arrived at
+independently.
+
+The frontend is recognised from the document rather than a `--format`
+flag: the two shapes are unambiguous, and a flag is one more thing a
+pipeline can get wrong. A file carrying *both* marker fields is refused
+rather than resolved by precedence — picking one would mean enforcing
+half a document on a coin flip.
 
 ### Refuse, don't downgrade
 

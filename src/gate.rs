@@ -33,7 +33,7 @@ use lex_os_manifest::{Manifest, ManifestError, Reversibility};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    compile_str, cost::CostError, facet::Gravity, manifest::infra_facet, CompiledPlan, CostReport,
+    compile_any, cost::CostError, facet::Gravity, manifest::infra_facet, CompiledPlan, CostReport,
     Denial, EffectRow, InfraFacet, PlanError, Verb,
 };
 
@@ -201,7 +201,10 @@ pub fn check(
     manifest: &Manifest,
     cost: Option<&CostReport>,
 ) -> Result<Decision, GateError> {
-    let plan = compile_str(plan_json)?;
+    // The one line milestone 5 changed in the gate: which reader runs.
+    // Everything downstream — the walls, the facet, the audit vocabulary
+    // — is frontend-independent.
+    let plan = compile_any(plan_json)?;
     // Read the authority before writing anything: a manifest whose
     // facet will not parse means the gate cannot run, and a request
     // record would claim it did.

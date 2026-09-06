@@ -32,6 +32,8 @@ pub mod facet;
 pub mod gate;
 pub mod manifest;
 pub mod plan;
+pub mod pulumi;
+pub mod resource;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -43,11 +45,16 @@ pub use facet::{Denial, Gravity, InfraFacet, Scope};
 pub use gate::{check, Decision, GateError, PlanEvent, Refusal, Verdict, Wall};
 pub use manifest::{infra_facet, narrow, registry};
 pub use plan::{Plan, PlanError, Verb};
+pub use resource::ResourceKey;
 
 /// The manifest a run is authorised by is lex-os's, not this crate's.
 /// Re-exported so a consumer needs one dependency, not two, and so the
 /// identity of the type is unambiguous: there is exactly one.
 pub use lex_os_manifest::{Manifest, Reversibility};
+
+/// Re-exported so a consumer inspecting the audit chain needs one
+/// dependency, not two.
+pub use lex_os_audit;
 
 /// One resource change, compiled.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +129,45 @@ impl CompiledPlan {
     }
 }
 
+/// Which tool produced a plan document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Frontend {
+    Terraform,
+    Pulumi,
+}
+
+/// Recognise the frontend from the shape of the document.
+///
+/// Detection rather than a `--format` flag, because the two shapes are
+/// unambiguous and a flag is one more thing to get wrong in a pipeline
+/// — with the failure mode being that the gate reads the wrong half of
+/// a document. A file carrying *both* marker fields is refused rather
+/// than resolved by precedence: see [`PlanError::Ambiguous`].
+pub fn detect(src: &str) -> Result<Frontend, PlanError> {
+    let raw: serde_json::Value = serde_json::from_str(src)?;
+    match (
+        raw.get("resource_changes").is_some(),
+        raw.get("steps").is_some(),
+    ) {
+        (true, false) => Ok(Frontend::Terraform),
+        (false, true) => Ok(Frontend::Pulumi),
+        (true, true) => Err(PlanError::Ambiguous),
+        (false, false) => Err(PlanError::NotAPlan),
+    }
+}
+
+/// Compile a plan from whichever frontend produced it.
+///
+/// This is the whole of what milestone 5 added to the gate's path: one
+/// dispatch. `check`, `InfraFacet` and the grant format were not
+/// touched, which is the claim the milestone existed to test.
+pub fn compile_any(src: &str) -> Result<CompiledPlan, PlanError> {
+    match detect(src)? {
+        Frontend::Terraform => compile_str(src),
+        Frontend::Pulumi => pulumi::compile_str(src),
+    }
+}
+
 /// Compile plan JSON to effect rows.
 ///
 /// Pure: no network, no filesystem, no cloud credentials. The only
@@ -141,12 +187,13 @@ pub fn compile(plan: &Plan, raw: &str) -> CompiledPlan {
             // `None` and `[]` both mean "this row does not say", which
             // `from_actions` answers as `Unknown` rather than `NoOp`.
             let verb = Verb::from_actions(rc.change.actions.as_deref().unwrap_or(&[]));
+            let key = ResourceKey::from_terraform(&rc.r#type);
             EffectRow {
                 effect: Effect::new(&rc.r#type, verb, &rc.address),
-                reversibility: classify(&rc.r#type, verb, &rc.mode),
+                reversibility: classify(&key, verb, &rc.mode),
                 address: rc.address.clone(),
                 resource_type: rc.r#type.clone(),
-                unknown_type: !classify::is_known(&rc.r#type),
+                unknown_type: !classify::is_known(&key),
             }
         })
         .collect();
@@ -158,7 +205,7 @@ pub fn compile(plan: &Plan, raw: &str) -> CompiledPlan {
     }
 }
 
-fn sha256_hex(src: &str) -> String {
+pub(crate) fn sha256_hex(src: &str) -> String {
     let mut h = Sha256::new();
     h.update(src.as_bytes());
     hex::encode(h.finalize())

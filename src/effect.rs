@@ -45,10 +45,14 @@ impl std::fmt::Display for Effect {
 /// `google_*` becomes `gcp` because that is what an operator writes in a
 /// grant and what the design doc's examples use; the rest are already
 /// the names people say.
-fn provider_of(prefix: &str) -> &str {
+pub(crate) fn provider_of(prefix: &str) -> &str {
     match prefix {
+        // Terraform spellings.
         "google" => "gcp",
         "azurerm" => "azure",
+        // Pulumi spellings for the same providers.
+        "google-native" => "gcp",
+        "azure-native" => "azure-native",
         "kubernetes" => "k8s",
         other => other,
     }
@@ -97,6 +101,23 @@ impl Effect {
         Effect {
             provider,
             service,
+            verb,
+            scope: scope.into(),
+        }
+    }
+
+    /// Build from an already-canonical [`ResourceKey`], which is how
+    /// the Pulumi frontend arrives: it has no Terraform type string to
+    /// split, and inventing one to feed [`Effect::new`] would be a
+    /// round trip through a spelling neither side uses.
+    pub fn from_key(
+        key: &crate::resource::ResourceKey,
+        verb: Verb,
+        scope: impl Into<String>,
+    ) -> Self {
+        Effect {
+            provider: key.provider.clone(),
+            service: key.service.clone(),
             verb,
             scope: scope.into(),
         }
