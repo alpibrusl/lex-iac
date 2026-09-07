@@ -22,7 +22,8 @@
 use std::process::ExitCode;
 
 use lex_iac::{
-    check, infra_facet, narrow, CostReport, Keyring, Manifest, Standing, Submitter, Verdict, Wall,
+    check, infra_facet, narrow, Chain, CostReport, Keyring, Manifest, PlanEvent, SigningKey,
+    Standing, Submitter, Verdict, VerifyingKey, Wall,
 };
 
 const USAGE: &str = "\
@@ -30,7 +31,10 @@ usage:
   lex-iac check --grant <manifest.json> --plan <plan.json> [--cost <cost.json>]
                 [--signer <id>] [--trusted-keys <keyring.json>]
                 [--audit-out <log.json>] [--json]
+                [--audit-key <hex> | --audit-key-file <path>]
   lex-iac manifest narrow --parent <manifest.json> --child <manifest.json>
+  lex-iac audit verify --log <log.json> [--trusted-key <hex>]...
+  lex-iac audit pubkey [--key <hex> | --key-file <path>]
 
 --cost takes an estimator's JSON (Infracost today). Without it the spend
 is unknown, and an unknown price is not a price of zero: creating or
@@ -47,6 +51,18 @@ named, no wildcards. It never widens the grant.
 --audit-out writes the hash-chained decision log, which is the input to
 `lex attest import-apply`.
 
+--audit-key/--audit-key-file seals every entry of that log (lex-os#54).
+The chain's hashes are derived, so whoever can reach the file can rewrite
+a refusal into an acceptance and recompute them; the seal is the part they
+cannot forge. `audit verify --trusted-key <public hex>` checks it. Prefer
+the file: a secret in argv is a secret in `ps` and in shell history.
+
+Note what a seal does NOT do: it does not make --signer true. That flag is
+a claim typed on a command line, and nothing upstream of this gate
+authenticates who ran `terraform plan`. Sealing raises the record from
+unattributable-and-editable to attributable-to-this-gate and
+tamper-evident.
+
 exit: 0 allowed, 8 refused, 2 could not run";
 
 fn main() -> ExitCode {
@@ -55,6 +71,8 @@ fn main() -> ExitCode {
     match refs.as_slice() {
         ["check", rest @ ..] => cmd_check(rest),
         ["manifest", "narrow", rest @ ..] => cmd_narrow(rest),
+        ["audit", "verify", rest @ ..] => cmd_audit_verify(rest),
+        ["audit", "pubkey", rest @ ..] => cmd_audit_pubkey(rest),
         ["--help"] | ["-h"] | [] => {
             println!("{USAGE}");
             ExitCode::from(0)
@@ -75,11 +93,35 @@ fn money(minor: i64) -> String {
 }
 
 /// Pull `--name value` out of an argument list.
+/// Every value given for a flag, in order.
+///
+/// Both spellings, `--name value` and `--name=value`, and repeats of
+/// either — `--trusted-key` is a list, and an operator should not have
+/// to encode one into a single argument.
+fn flags<'a>(args: &[&'a str], name: &str) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i];
+        if a == name {
+            if let Some(v) = args.get(i + 1) {
+                out.push(*v);
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(rest) = a.strip_prefix(name) {
+            if let Some(v) = rest.strip_prefix('=') {
+                out.push(v);
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
 fn flag<'a>(args: &[&'a str], name: &str) -> Option<&'a str> {
-    args.iter()
-        .position(|a| *a == name)
-        .and_then(|i| args.get(i + 1))
-        .copied()
+    flags(args, name).into_iter().next()
 }
 
 fn read(path: &str) -> Result<String, ExitCode> {
@@ -194,7 +236,29 @@ fn cmd_check(args: &[&str]) -> ExitCode {
         }
     };
 
-    let decision = match check(&plan_src, &manifest, cost.as_ref(), submitter.as_ref()) {
+    let audit_key =
+        match load_signing_key(flag(args, "--audit-key"), flag(args, "--audit-key-file")) {
+            Ok(k) => k,
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::from(2);
+            }
+        };
+    if audit_key.is_none() && flag(args, "--audit-out").is_some() {
+        // Said out loud, because the file looks equally trustworthy
+        // either way and only one of them is.
+        eprintln!(
+            "note: writing an UNSEALED audit log — anyone who can reach it can rewrite \
+             a verdict and recompute the hashes. Pass --audit-key-file to seal it"
+        );
+    }
+
+    let decision = match match &audit_key {
+        Some(k) => {
+            lex_iac::check_sealed(&plan_src, &manifest, cost.as_ref(), submitter.as_ref(), k)
+        }
+        None => check(&plan_src, &manifest, cost.as_ref(), submitter.as_ref()),
+    } {
         Ok(d) => d,
         Err(e) => {
             eprintln!("the gate could not run: {e}");
@@ -309,9 +373,14 @@ fn print_human(decision: &lex_iac::Decision, manifest: &Manifest, infra: &lex_ia
     }
 
     println!(
-        "\naudit: {} entries, head sha256:{}",
+        "\naudit: {} entries, head sha256:{}{}",
         decision.audit.len(),
-        decision.audit.head()
+        decision.audit.head(),
+        if !decision.audit.is_empty() && decision.audit.sealed_count() == decision.audit.len() {
+            " (sealed)"
+        } else {
+            " (UNSEALED — anyone who can reach the file can rewrite it)"
+        }
     );
 }
 
@@ -382,5 +451,169 @@ fn cmd_narrow(args: &[&str]) -> ExitCode {
             println!("  {e}");
             ExitCode::from(8)
         }
+    }
+}
+
+/// Read a 32-byte hex signing key from a flag or a file.
+///
+/// The file is the one to reach for: a secret in argv is a secret in
+/// `ps` output and in shell history, and an audit key that leaks is an
+/// audit log anyone can re-sign.
+fn load_signing_key(
+    key: Option<&str>,
+    key_file: Option<&str>,
+) -> Result<Option<SigningKey>, String> {
+    let hex_key = match (key, key_file) {
+        (None, None) => return Ok(None),
+        (Some(k), _) => k.to_string(),
+        (None, Some(p)) => std::fs::read_to_string(p)
+            .map_err(|e| format!("cannot read {p}: {e}"))?
+            .trim()
+            .to_string(),
+    };
+    decode_key32(&hex_key).map(|b| Some(SigningKey::from_bytes(&b)))
+}
+
+fn decode_key32(hex_key: &str) -> Result<[u8; 32], String> {
+    hex::decode(hex_key.trim())
+        .ok()
+        .and_then(|b| <[u8; 32]>::try_from(b).ok())
+        .ok_or_else(|| format!("`{hex_key}` is not 32 hex-encoded bytes"))
+}
+
+/// `audit pubkey` — the public half of an audit signing key.
+///
+/// Sealing uses the secret and verifying uses the public key, and those
+/// are different 32-byte strings. Deriving it here beats an operator
+/// tracking a pair by hand — or worse, handing a verifier the secret
+/// because it was the one they had.
+fn cmd_audit_pubkey(args: &[&str]) -> ExitCode {
+    match load_signing_key(flag(args, "--key"), flag(args, "--key-file")) {
+        Ok(Some(k)) => {
+            println!("{}", hex::encode(k.verifying_key().to_bytes()));
+            ExitCode::from(0)
+        }
+        Ok(None) => {
+            eprintln!("audit pubkey needs --key or --key-file\n\n{USAGE}");
+            ExitCode::from(2)
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// `audit verify` — the chain always, the seals when given a key.
+///
+/// Reported separately, because they catch different things and a single
+/// `verified` would let a reader believe the log was held to a wall
+/// nobody asked for:
+///
+/// - the **chain** catches an edited payload and a reordered entry, but
+///   not a holder who edits and then recomputes every hash;
+/// - the **seals** catch exactly that holder.
+///
+/// Supplying no key checks no seals, and says so rather than passing.
+fn cmd_audit_verify(args: &[&str]) -> ExitCode {
+    let Some(path) = flag(args, "--log") else {
+        eprintln!("audit verify needs --log\n\n{USAGE}");
+        return ExitCode::from(2);
+    };
+    let src = match read(path) {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    let log: Chain<PlanEvent> = match Chain::from_json(&src) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("could not read the audit log {path}: {e}");
+            return ExitCode::from(2);
+        }
+    };
+
+    if let Err(e) = log.verify() {
+        println!("REFUSED — the hash chain is broken.");
+        println!("  {e}");
+        return ExitCode::from(8);
+    }
+
+    let trusted_hex = flags(args, "--trusted-key");
+    if trusted_hex.is_empty() {
+        println!(
+            "chain:  OK — {} entries, head sha256:{}",
+            log.len(),
+            log.head()
+        );
+        println!(
+            "seals:  NOT CHECKED — {} of {} entries carry one.",
+            log.sealed_count(),
+            log.len()
+        );
+        println!("        Pass --trusted-key <hex> to hold them to it.");
+        return ExitCode::from(0);
+    }
+
+    let mut trusted = Vec::new();
+    for h in &trusted_hex {
+        match decode_key32(h).and_then(|b| {
+            VerifyingKey::from_bytes(&b).map_err(|_| format!("`{h}` is not an Ed25519 public key"))
+        }) {
+            Ok(k) => trusted.push(k),
+            Err(e) => {
+                eprintln!("--trusted-key {e}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+
+    match log.verify_seals(&trusted) {
+        Ok(()) => {
+            println!(
+                "chain:  OK — {} entries, head sha256:{}",
+                log.len(),
+                log.head()
+            );
+            println!("seals:  OK — every entry sealed by a trusted key.");
+            ExitCode::from(0)
+        }
+        Err(e) => {
+            println!("REFUSED — the seals do not hold.");
+            println!("  {e}");
+            println!(
+                "\nA broken seal on an intact chain is the interesting case: it means\n\
+                 somebody edited the log and recomputed the hashes. That is precisely\n\
+                 what the chain alone cannot see."
+            );
+            ExitCode::from(8)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::flags;
+
+    /// Both spellings, and repeats of either.
+    #[test]
+    fn flags_read_both_spellings() {
+        let args = ["--log=log.json", "--trusted-key", "aa", "--trusted-key=bb"];
+        assert_eq!(flags(&args, "--log"), vec!["log.json"]);
+        assert_eq!(flags(&args, "--trusted-key"), vec!["aa", "bb"]);
+        assert!(flags(&args, "--cost").is_empty());
+    }
+
+    /// A prefix is not a flag: `--audit` must not match `--audit-out`,
+    /// or a typo silently configures something else.
+    #[test]
+    fn a_prefix_of_a_flag_is_not_that_flag() {
+        let args = ["--audit-out=log.json"];
+        assert!(flags(&args, "--audit").is_empty());
+        assert_eq!(flags(&args, "--audit-out"), vec!["log.json"]);
+    }
+
+    #[test]
+    fn a_trailing_flag_has_no_value() {
+        assert!(flags(&["--log"], "--log").is_empty());
     }
 }

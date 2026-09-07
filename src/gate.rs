@@ -29,7 +29,7 @@
 //! carries why — "refuse, don't downgrade" in the type rather than in a
 //! comment.
 
-use lex_os_audit::{Chain, ChainPayload};
+use lex_os_audit::{Chain, ChainPayload, SigningKey};
 use lex_os_manifest::{Manifest, ManifestError, Reversibility};
 use serde::{Deserialize, Serialize};
 
@@ -264,6 +264,43 @@ pub fn check(
     cost: Option<&CostReport>,
     submitter: Option<&Submitter>,
 ) -> Result<Decision, GateError> {
+    check_inner(plan_json, manifest, cost, submitter, None)
+}
+
+/// [`check`], with every audit entry sealed by `key` (lex-os#54).
+///
+/// # What a seal proves here, and what it does not
+///
+/// It proves **this gate wrote this record, and nobody edited it
+/// afterwards**. The chain alone cannot say that: its hashes are
+/// derived from the contents, so whoever can reach the log file can
+/// rewrite a refusal into an acceptance, recompute every hash, and hand
+/// you something that verifies perfectly.
+///
+/// It does **not** make `--signer` true. That flag is a claim typed on
+/// a command line — nothing upstream of this gate authenticates who ran
+/// `terraform plan`, which is exactly why lex-k8s takes no such flag and
+/// reads the API server's `userInfo.username` instead
+/// (alpibrusl/lex-os#70). Sealing raises the record from *unattributable
+/// and editable* to *attributable to this gate and tamper-evident*. The
+/// submitter's identity is no more verified than it was.
+pub fn check_sealed(
+    plan_json: &str,
+    manifest: &Manifest,
+    cost: Option<&CostReport>,
+    submitter: Option<&Submitter>,
+    key: &SigningKey,
+) -> Result<Decision, GateError> {
+    check_inner(plan_json, manifest, cost, submitter, Some(key))
+}
+
+fn check_inner(
+    plan_json: &str,
+    manifest: &Manifest,
+    cost: Option<&CostReport>,
+    submitter: Option<&Submitter>,
+    audit_key: Option<&SigningKey>,
+) -> Result<Decision, GateError> {
     // The one line milestone 5 changed in the gate: which reader runs.
     // Everything downstream — the walls, the facet, the audit vocabulary
     // — is frontend-independent.
@@ -276,7 +313,14 @@ pub fn check(
         c.check_currency(&infra.currency)?;
     }
 
-    let mut audit: Chain<PlanEvent> = Chain::new();
+    // Sealed before the first append, so no entry is ever written
+    // unsealed — including the request record, which is logged before
+    // any wall runs and is therefore the one an after-the-fact editor
+    // would most like to be missing.
+    let mut audit: Chain<PlanEvent> = match audit_key {
+        Some(k) => Chain::new().sealed_with(k.clone()),
+        None => Chain::new(),
+    };
     let manifest_id = manifest.content_id().0;
     let signer = submitter.map(|s| s.signer.clone());
     let standing = submitter.map_or(Standing::NotConsulted, |s| s.standing);
