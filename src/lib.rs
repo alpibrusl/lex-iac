@@ -40,7 +40,7 @@ pub mod trust;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub use apply::{apply_argv, permits_apply, BoxSpec};
+pub use apply::{apply_argv, permits_apply, resolve_box_path, BoxSpec};
 pub use classify::classify;
 pub use cost::{CostError, CostReport};
 pub use effect::Effect;

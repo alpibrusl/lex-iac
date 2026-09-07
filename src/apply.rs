@@ -31,7 +31,7 @@
 //! host-side proxy is a real decision with real blast radius, and it is
 //! not one a plumbing layer should make by defaulting.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use lex_os_manifest::{Level, Manifest};
 
@@ -86,6 +86,20 @@ pub fn permits_apply(manifest: &Manifest) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// Resolve a path the box will be booted from to an absolute one.
+///
+/// lex-os's default asset paths are relative to **its own** checkout, and
+/// the jailer chroots before opening them — so a relative path handed
+/// across the process boundary resolves against a directory this caller
+/// does not control, and surfaces as `No such file or directory` from
+/// deep inside provisioning, after a tap and a jail have been made and
+/// unmade. Canonicalising here turns that into a sentence naming the
+/// file, before anything boots.
+pub fn resolve_box_path(what: &str, p: &Path) -> Result<PathBuf, String> {
+    p.canonicalize()
+        .map_err(|e| format!("--box-{what} {}: {e}", p.display()))
 }
 
 /// The exact `lex-os exec` invocation, as argv.
@@ -147,6 +161,25 @@ mod tests {
             Grant::new(Level::Full, Level::Allowlist, exec),
             Budget::research_default(),
         )
+    }
+
+    /// A path the caller gave must reach the box as an absolute one, or
+    /// it resolves against lex-os's cwd rather than this one. Found the
+    /// hard way: `--box-rootfs demo/assets/box.ext4` run from lex-iac's
+    /// directory died as `No such file or directory (os error 2)` inside
+    /// provisioning, naming nothing.
+    #[test]
+    fn a_relative_box_path_is_resolved_before_it_crosses_the_boundary() {
+        let here = resolve_box_path("rootfs", Path::new(".")).expect("cwd resolves");
+        assert!(here.is_absolute(), "{here:?}");
+    }
+
+    /// And a path that is not there is a sentence, not a boot failure.
+    #[test]
+    fn a_missing_box_path_names_itself() {
+        let err = resolve_box_path("rootfs", Path::new("/nope/box.ext4")).unwrap_err();
+        assert!(err.contains("--box-rootfs"), "{err}");
+        assert!(err.contains("/nope/box.ext4"), "{err}");
     }
 
     /// A grant may authorise a *decision* without authorising the

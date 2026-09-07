@@ -659,9 +659,37 @@ fn cmd_apply(args: &[&str]) -> ExitCode {
         return ExitCode::from(8);
     }
 
+    // Absolute before it crosses the process boundary: lex-os resolves
+    // relative paths against its own cwd, and the jailer chroots before
+    // opening them.
+    let rootfs = match lex_iac::resolve_box_path("rootfs", std::path::Path::new(rootfs)) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    let kernel = match flag(args, "--box-kernel") {
+        None => None,
+        Some(k) => match lex_iac::resolve_box_path("kernel", std::path::Path::new(k)) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::from(2);
+            }
+        },
+    };
+    if kernel.is_none() {
+        eprintln!(
+            "note: no --box-kernel, so lex-os boots its own default — which is a path \
+             relative to the lex-os checkout, not this one. Pass --box-kernel if \
+             provisioning cannot find it."
+        );
+    }
+
     let spec = lex_iac::BoxSpec {
-        rootfs: std::path::PathBuf::from(rootfs),
-        kernel: flag(args, "--box-kernel").map(std::path::PathBuf::from),
+        rootfs,
+        kernel,
         work_dir: flag(args, "--work-dir").unwrap_or("/work").to_string(),
         tfplan: flag(args, "--tfplan").unwrap_or("tfplan").to_string(),
         lex_os: flag(args, "--lex-os").unwrap_or("lex-os").to_string(),
