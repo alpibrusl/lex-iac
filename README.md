@@ -435,12 +435,80 @@ Sealing raises the record from *unattributable and editable* to
 *attributable to this gate and tamper-evident*. A real improvement, and
 a different claim.
 
+## Applying inside the box
+
+The gate decides; something else applies. Milestone 6 makes that
+something else a **lex-os microVM whose egress is this grant's own
+allowlist**, so a provider that mutates outside its declared plan is
+bounded by a wall rather than by the plan's honesty.
+
+```sh
+sudo bash demo/build-box.sh          # a guest image with terraform + the planned dir
+lex-iac apply --grant payments.json --plan plan.json \
+              --box-rootfs demo/assets/box.ext4 --dry-run
+```
+
+**One manifest, two enforcement points.** The grant the gate checks is a
+`lex_os_manifest::Manifest`, which is exactly what `lex-os exec` takes —
+so the *same file* is passed to both. The egress the gate reasoned about
+is the egress the box is confined to, and there is no second declaration
+that could drift from the first.
+
+A consequence worth stating: **a grant with `exec: None` cannot apply.**
+Applying is executing, and a grant that never said so has authorised a
+*decision*, not an action. That is a coherent thing to want, and it is
+why `check` and `apply` are separate verbs.
+
+**A refusal never reaches the box.** The gate runs first; on a refusal
+`apply` returns the gate's exit code before the box is built, and says
+so:
+
+```
+REFUSED — 1 effect(s) outside the grant:
+  local.file.create  [narrowing]  at: local_file.applied
+
+apply: the gate did not allow this plan, so nothing was executed.
+       The box was never booted and terraform was never invoked.
+```
+
+Name the effect in the grant and the same plan applies:
+
+```
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+box exited 0
+```
+
+### What the box deliberately cannot do
+
+- **It cannot re-plan.** `apply` receives a *planned document*, not a
+  config. Re-planning inside would let it act on something nobody gated.
+- **It cannot `init`.** That fetches provider code from a registry, and a
+  box allowed to reach one could fetch and run anything. `init` happens
+  on the host, and the box receives the plan *and the providers it was
+  planned against* — which is also how the real workflow runs: plan in
+  CI, apply from the artifact.
+- **It holds no credentials**, and `demo/build-box.sh` refuses to plan
+  with any provider that would need them. Whether cloud credentials
+  belong inside the box or behind a host-side proxy is a real decision
+  with real blast radius, and not one a demo should make by defaulting.
+
+### Not yet
+
+The gate's audit chain and the box's session are **two chains**, not one.
+lex-os can seed a session's log from a prior decision (`with_seed_audit`)
+so both live on one hash chain, but that is an in-process API and this
+hands off across a subprocess. Until they are joined, `--audit-out` and
+`--box-audit-out` are related by nothing stronger than the operator
+keeping both.
+
 ## Honest cautions
 
-1. **The gate is exactly as safe as the plan is honest.** A provider
-   that mutates outside its declared plan — some do, on drift — is
-   invisible here. Bounding that needs the apply to run inside the
-   perimeter, which is the last milestone, not the first.
+1. **The gate is exactly as safe as the plan is honest — unless you
+   apply in the box.** A provider that mutates outside its declared plan
+   — some do, on drift — is invisible to a document reader. `lex-iac
+   apply` bounds it at the perimeter instead, which is what milestone 6
+   is for. Plain `lex-iac check` followed by an apply on the host still
+   has this hole, and always will.
 2. **Effect granularity is a judgement call.** Too coarse (`aws.*`) and
    a grant means nothing; too fine and nobody writes one.
    `provider.service.verb` plus scopes is the compromise, and it may

@@ -32,6 +32,10 @@ usage:
                 [--signer <id>] [--trusted-keys <keyring.json>]
                 [--audit-out <log.json>] [--json]
                 [--audit-key <hex> | --audit-key-file <path>]
+  lex-iac apply --grant <manifest.json> --plan <plan.json> --box-rootfs <box.ext4>
+                [--box-kernel <vmlinux>] [--work-dir /work] [--tfplan tfplan]
+                [--jail-uid <n>] [--jail-gid <n>] [--lex-os <path>] [--dry-run]
+                [every `check` flag too]
   lex-iac manifest narrow --parent <manifest.json> --child <manifest.json>
   lex-iac audit verify --log <log.json> [--trusted-key <hex>]...
   lex-iac audit pubkey [--key <hex> | --key-file <path>]
@@ -63,6 +67,21 @@ authenticates who ran `terraform plan`. Sealing raises the record from
 unattributable-and-editable to attributable-to-this-gate and
 tamper-evident.
 
+`apply` is `check`, and then — only if the gate allowed it — the same plan
+applied inside a lex-os microVM whose egress is the grant's own allowlist.
+A refusal never reaches the box: nothing is executed, and the exit code is
+the gate's.
+
+The box is confined by the SAME manifest the gate checked, byte for byte,
+so there is no second declaration to drift. A grant with `exec: None` is
+refused up front: a grant may authorise a decision without authorising the
+action, which is why `check` and `apply` are separate verbs.
+
+The box applies a *planned document* (`--tfplan`), never a config: it does
+not re-plan, and it does not `init`, which would fetch provider code from a
+registry the box is not allowed to reach. Build the image with
+`demo/build-box.sh`.
+
 exit: 0 allowed, 8 refused, 2 could not run";
 
 fn main() -> ExitCode {
@@ -71,6 +90,7 @@ fn main() -> ExitCode {
     match refs.as_slice() {
         ["check", rest @ ..] => cmd_check(rest),
         ["manifest", "narrow", rest @ ..] => cmd_narrow(rest),
+        ["apply", rest @ ..] => cmd_apply(rest),
         ["audit", "verify", rest @ ..] => cmd_audit_verify(rest),
         ["audit", "pubkey", rest @ ..] => cmd_audit_pubkey(rest),
         ["--help"] | ["-h"] | [] => {
@@ -586,6 +606,99 @@ fn cmd_audit_verify(args: &[&str]) -> ExitCode {
                  what the chain alone cannot see."
             );
             ExitCode::from(8)
+        }
+    }
+}
+
+/// `apply` — gate the plan, then apply it inside the box.
+///
+/// The order is the whole point, and it is structural rather than
+/// conventional: the gate runs first, a refusal returns before the box
+/// is built, and the argv that would boot it is not constructed on that
+/// path. There is no branch where a refused plan reaches terraform.
+fn cmd_apply(args: &[&str]) -> ExitCode {
+    // 1. The gate. Identical to `check` — same inputs, same walls, same
+    //    audit — because a plan that `check` refuses must not become
+    //    applicable by asking a different way.
+    let code = cmd_check(args);
+    if code != ExitCode::from(0) {
+        eprintln!();
+        eprintln!("apply: the gate did not allow this plan, so nothing was executed.");
+        eprintln!("       The box was never booted and terraform was never invoked.");
+        return code;
+    }
+
+    let Some(grant_path) = flag(args, "--grant") else {
+        eprintln!("apply needs --grant\n\n{USAGE}");
+        return ExitCode::from(2);
+    };
+    let Some(rootfs) = flag(args, "--box-rootfs") else {
+        eprintln!(
+            "apply needs --box-rootfs: the guest image carrying terraform and the planned\n\
+             working directory. Build one with demo/build-box.sh.\n\n{USAGE}"
+        );
+        return ExitCode::from(2);
+    };
+
+    // 2. Applying is executing, and a grant that never said so does not
+    //    authorise it. lex-os refuses this at the perimeter anyway; this
+    //    is the same refusal delivered as a sentence rather than as a
+    //    booted VM and a denial.
+    let manifest = match read(grant_path).and_then(|src| {
+        Manifest::from_json(&src).map_err(|e| {
+            eprintln!("could not read the grant {grant_path}: {e}");
+            ExitCode::from(2)
+        })
+    }) {
+        Ok(m) => m,
+        Err(c) => return c,
+    };
+    if let Err(why) = lex_iac::permits_apply(&manifest) {
+        println!();
+        println!("REFUSED — {why}");
+        return ExitCode::from(8);
+    }
+
+    let spec = lex_iac::BoxSpec {
+        rootfs: std::path::PathBuf::from(rootfs),
+        kernel: flag(args, "--box-kernel").map(std::path::PathBuf::from),
+        work_dir: flag(args, "--work-dir").unwrap_or("/work").to_string(),
+        tfplan: flag(args, "--tfplan").unwrap_or("tfplan").to_string(),
+        lex_os: flag(args, "--lex-os").unwrap_or("lex-os").to_string(),
+        jail_uid: flag(args, "--jail-uid").and_then(|v| v.parse().ok()),
+        jail_gid: flag(args, "--jail-gid").and_then(|v| v.parse().ok()),
+    };
+    let box_audit = flag(args, "--box-audit-out");
+    let argv = lex_iac::apply_argv(&spec, grant_path, box_audit);
+
+    println!();
+    println!("ALLOWED — applying inside the box.");
+    println!("  {}", argv.join(" "));
+
+    if args.contains(&"--dry-run") {
+        println!();
+        println!("(--dry-run: the box was not booted)");
+        return ExitCode::from(0);
+    }
+
+    // 3. Hand off. lex-os owns the perimeter; this gate does not
+    //    reimplement it, and its exit code is passed through unchanged —
+    //    a box that refused an effect must not read as an apply that
+    //    succeeded.
+    match std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .status()
+    {
+        Ok(st) => {
+            let code = st.code().unwrap_or(2);
+            println!();
+            println!("box exited {code}");
+            ExitCode::from(code as u8)
+        }
+        Err(e) => {
+            eprintln!("apply: could not run `{}`: {e}", spec.lex_os);
+            eprintln!("       Is lex-os on PATH? Override with --lex-os <path>.");
+            ExitCode::from(2)
         }
     }
 }
