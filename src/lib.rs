@@ -43,7 +43,7 @@ pub use classify::classify;
 pub use cost::{CostError, CostReport};
 pub use effect::Effect;
 pub use facet::{Denial, Gravity, InfraFacet, Scope};
-pub use gate::{check, Decision, GateError, PlanEvent, Refusal, Verdict, Wall};
+pub use gate::{check, check_sealed, Decision, GateError, PlanEvent, Refusal, Verdict, Wall};
 pub use manifest::{infra_facet, narrow, registry};
 pub use plan::{Plan, PlanError, Verb};
 pub use resource::ResourceKey;
@@ -53,6 +53,10 @@ pub use trust::{Keyring, Standing, Submitter, TrustError};
 /// Re-exported so a consumer needs one dependency, not two, and so the
 /// identity of the type is unambiguous: there is exactly one.
 pub use lex_os_manifest::{Manifest, Reversibility};
+// Re-exported so a consumer sealing this gate's logs needs no direct
+// dependency on ed25519 — two crates on two versions of it would stop
+// verifying each other's records.
+pub use lex_os_audit::{Chain, Checkpoint, SigningKey, VerifyingKey};
 
 /// Re-exported so a consumer inspecting the audit chain needs one
 /// dependency, not two.

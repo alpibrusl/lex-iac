@@ -394,6 +394,47 @@ approval. The chain is `lex_os_audit::Chain<E>`, carrying this gate's
 own event vocabulary — lex-os made it generic (lex-os#67) so a
 downstream gate would not reimplement tamper-evidence.
 
+### Sealing the log
+
+The chain is tamper-*evident* only against someone who cannot recompute
+it. Its hashes are **derived from the contents**, so whoever can reach
+the file can rewrite a refusal into an acceptance, rebuild every hash,
+and hand you a log that verifies perfectly. That is not hypothetical —
+it is forty lines of script with no key and no privilege.
+
+`--audit-key-file` seals every entry with Ed25519
+([lex-os#54](https://github.com/alpibrusl/lex-os/issues/54)), which is
+the part they cannot rebuild:
+
+```sh
+lex-iac audit pubkey --key-file audit.key        # the half a verifier needs
+lex-iac check … --audit-out log.json --audit-key-file audit.key
+lex-iac audit verify --log log.json --trusted-key <public-hex>
+```
+
+```
+chain:  OK — 2 entries, head sha256:a393a9f4…
+seals:  NOT CHECKED — 2 of 2 entries carry one.        # without a key
+
+REFUSED — the seals do not hold.                        # on a forgery
+  audit seal invalid at seq 1: seal does not verify against the entry's
+  actual contents
+```
+
+`audit verify` reports the two walls **separately**, and says
+`NOT CHECKED` rather than `OK` when given no key: a log whose seals
+nobody checked is not a log whose seals passed. Sealing is opt-in, and a
+run writing an unsealed log says so on the way past.
+
+**What a seal does not do: make `--signer` true.** That flag is a claim
+typed on a command line, and nothing upstream of this gate
+authenticates who ran `terraform plan` — which is exactly why lex-k8s
+takes no such flag and reads the API server's `userInfo.username`
+instead ([lex-os#70](https://github.com/alpibrusl/lex-os/issues/70)).
+Sealing raises the record from *unattributable and editable* to
+*attributable to this gate and tamper-evident*. A real improvement, and
+a different claim.
+
 ## Honest cautions
 
 1. **The gate is exactly as safe as the plan is honest.** A provider
@@ -420,7 +461,16 @@ downstream gate would not reimplement tamper-evidence.
    `lex producer-trust recompute --tool <id>` to find out which. The
    threshold also lives with whoever exported the keyring, not in the
    manifest, so two teams can disagree about what 700 means.
-6. **Narrowing a facet is subsumption; admitting an effect is not.** A
+6. **A seal proves the gate wrote the record, not that the submitter is
+   who they said.** `--signer` is asserted by whoever runs the CLI, and
+   sealing does not change that — it makes the *record* attributable and
+   tamper-evident, which is a different and smaller claim than
+   authenticating a submitter. It also does not stop the file being
+   **deleted**: each check writes its own chain, so a missing log leaves
+   no gap to notice. lex-k8s hit the same wall and answered it with a
+   running ledger of decision heads (alpibrusl/lex-k8s#13); nothing
+   equivalent exists here.
+7. **Narrowing a facet is subsumption; admitting an effect is not.** A
    parent granting `aws.rds.*` does let a child inherit
    `aws.rds.delete` — the child is genuinely no wider than its parent.
    Neither manifest thereby authorises destroying a database: that is
