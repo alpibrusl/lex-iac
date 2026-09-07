@@ -25,6 +25,7 @@
 //! assert!(compiled.has_consequential());
 //! ```
 
+pub mod apply;
 pub mod classify;
 pub mod cost;
 pub mod effect;
@@ -39,6 +40,7 @@ pub mod trust;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub use apply::{apply_argv, permits_apply, BoxSpec};
 pub use classify::classify;
 pub use cost::{CostError, CostReport};
 pub use effect::Effect;
