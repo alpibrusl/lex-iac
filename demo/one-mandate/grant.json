@@ -1,0 +1,30 @@
+{
+  "goal": {
+    "description": "serve and operate the payments API",
+    "done_signal": null
+  },
+  "grant": {
+    "filesystem": "ReadOnly",
+    "network": "Allowlist",
+    "exec": "Sandboxed"
+  },
+  "budget": {
+    "wall_clock_secs": 900,
+    "max_commands": 50,
+    "max_money_cents": 5000,
+    "max_api_calls": 200
+  },
+  "isolation_floor": "Namespace",
+  "egress": [
+    "postgres.payments.svc",
+    "api.stripe.com:443"
+  ],
+  "actuation": null,
+  "facets": {
+    "infra": {
+      "allow": [
+        "aws.ecs.*"
+      ]
+    }
+  }
+}

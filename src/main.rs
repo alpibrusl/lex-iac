@@ -28,7 +28,8 @@ use lex_iac::{
 
 const USAGE: &str = "\
 usage:
-  lex-iac check --grant <manifest.json> --plan <plan.json> [--cost <cost.json>]
+  lex-iac check --grant <manifest.json> (--tfplan <tfplan> | --plan <plan.json>)
+                [--cost <cost.json>]
                 [--signer <id>] [--trusted-keys <keyring.json>]
                 [--audit-out <log.json>] [--json]
                 [--audit-key <hex> | --audit-key-file <path>]
@@ -152,15 +153,43 @@ fn read(path: &str) -> Result<String, ExitCode> {
 }
 
 fn cmd_check(args: &[&str]) -> ExitCode {
-    let (Some(grant_path), Some(plan_path)) = (flag(args, "--grant"), flag(args, "--plan")) else {
-        eprintln!("check needs --grant and --plan\n\n{USAGE}");
+    let Some(grant_path) = flag(args, "--grant") else {
+        eprintln!("check needs --grant\n\n{USAGE}");
         return ExitCode::from(2);
     };
     let as_json = args.contains(&"--json");
 
-    let (grant_src, plan_src) = match (read(grant_path), read(plan_path)) {
-        (Ok(g), Ok(p)) => (g, p),
-        (Err(c), _) | (_, Err(c)) => return c,
+    // Two ways to name the plan, and they are not equivalent.
+    //
+    // `--tfplan` names the saved binary plan — the artifact terraform
+    // will actually apply — and the JSON is *derived* from it here, so
+    // the document the gate reasons about is a view of those bytes.
+    // `--plan` takes a JSON someone else produced, which is still
+    // supported (an estimator or a CI step may already have it) but
+    // cannot say anything about what apply will read. Prefer --tfplan.
+    let artifact = flag(args, "--tfplan");
+    let plan_path_opt = flag(args, "--plan");
+    let (plan_src, tfplan_sha256) = match (artifact, plan_path_opt) {
+        (Some(tf), _) => match lex_iac::derive_plan_json(std::path::Path::new(tf)) {
+            Ok((json, digest)) => (json, Some(digest)),
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::from(2);
+            }
+        },
+        (None, Some(p)) => match read(p) {
+            Ok(src) => (src, None),
+            Err(c) => return c,
+        },
+        (None, None) => {
+            eprintln!("check needs --tfplan (preferred) or --plan\n\n{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+
+    let grant_src = match read(grant_path) {
+        Ok(g) => g,
+        Err(c) => return c,
     };
 
     let manifest = match Manifest::from_json(&grant_src) {
@@ -308,14 +337,62 @@ fn cmd_check(args: &[&str]) -> ExitCode {
     if as_json {
         print_json(&decision, &manifest, &infra);
     } else {
-        print_human(&decision, &manifest, &infra);
+        print_human(&decision, &manifest, &infra, &tfplan_sha256);
+    }
+
+    // Write down what was accepted, so a later apply has something to be
+    // held to. Only on an acceptance, and only when the artifact is
+    // known: an approval that cannot name the bytes it approved is the
+    // problem, not a weaker version of the solution.
+    if let Some(out) = flag(args, "--approval-out") {
+        match (&decision.verdict, &tfplan_sha256) {
+            (lex_iac::Verdict::Allow, Some(digest)) => {
+                let approval = lex_iac::Approval {
+                    verdict: "accepted".into(),
+                    tfplan_sha256: digest.clone(),
+                    plan_sha256: decision.plan.plan_sha256.clone(),
+                    manifest_sha256: lex_iac::manifest_digest(&grant_src),
+                    goal: manifest.goal.description.clone(),
+                };
+                match serde_json::to_string_pretty(&approval)
+                    .map_err(|e| e.to_string())
+                    .and_then(|j| std::fs::write(out, j).map_err(|e| e.to_string()))
+                {
+                    Ok(()) => println!("approval:  written to {out}"),
+                    Err(e) => {
+                        eprintln!("could not write the approval to {out}: {e}");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            (lex_iac::Verdict::Allow, None) => {
+                eprintln!(
+                    "refusing to write an approval: --plan was supplied, so nothing here \
+                     names the artifact an apply would run. Use --tfplan."
+                );
+                return ExitCode::from(2);
+            }
+            _ => {}
+        }
     }
     ExitCode::from(decision.exit_code() as u8)
 }
 
-fn print_human(decision: &lex_iac::Decision, manifest: &Manifest, infra: &lex_iac::InfraFacet) {
+fn print_human(
+    decision: &lex_iac::Decision,
+    manifest: &Manifest,
+    infra: &lex_iac::InfraFacet,
+    tfplan_sha256: &Option<String>,
+) {
     println!("goal:      {}", manifest.goal.description);
     println!("plan:      sha256:{}", decision.plan.plan_sha256);
+    match &tfplan_sha256 {
+        Some(d) => println!("artifact:  sha256:{d}  (the saved plan this JSON was read from)"),
+        None => println!(
+            "artifact:  unbound — the JSON was supplied, not derived; \
+             pass --tfplan so apply can prove it is holding the same bytes"
+        ),
+    }
     println!("grant:     {}", manifest.content_id());
     match decision.charged {
         Some(minor) => println!(
@@ -684,6 +761,48 @@ fn cmd_apply(args: &[&str]) -> ExitCode {
             "note: no --box-kernel, so lex-os boots its own default — which is a path \
              relative to the lex-os checkout, not this one. Pass --box-kernel if \
              provisioning cannot find it."
+        );
+    }
+
+    // The binding, and the reason `apply` is more than `check` plus a
+    // boot. An earlier acceptance named a digest; this is where the file
+    // about to be applied is held to it.
+    //
+    // Note it compares against an approval written by a *previous* run.
+    // Re-deriving the digest here and comparing it to itself would be
+    // circular — the first attempt at this did exactly that and proved
+    // nothing, because the threat is not a swap within one process, it
+    // is a swap between the approval and the apply.
+    if let Some(app_path) = flag(args, "--approval") {
+        let Some(tf) = flag(args, "--tfplan") else {
+            eprintln!("--approval needs --tfplan: the approval names an artifact, so apply must be given one to hold to it");
+            return ExitCode::from(2);
+        };
+        let src = match read(app_path) {
+            Ok(s) => s,
+            Err(c) => return c,
+        };
+        let approval: lex_iac::Approval = match serde_json::from_str(&src) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("could not read the approval {app_path}: {e}");
+                return ExitCode::from(2);
+            }
+        };
+        let grant_for_check = match read(grant_path) {
+            Ok(g) => g,
+            Err(c) => return c,
+        };
+        if let Err(why) = approval.admits(std::path::Path::new(tf), &grant_for_check) {
+            println!();
+            println!("REFUSED — {why}");
+            println!();
+            println!("Nothing was applied. The box was never booted.");
+            return ExitCode::from(8);
+        }
+        println!(
+            "approval:  sha256:{} verified — this is the artifact that was accepted",
+            approval.tfplan_sha256
         );
     }
 

@@ -40,7 +40,10 @@ pub mod trust;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub use apply::{apply_argv, permits_apply, resolve_box_path, BoxSpec};
+pub use apply::{
+    apply_argv, artifact_matches, derive_plan_json, permits_apply, resolve_box_path, Approval,
+    BoxSpec,
+};
 pub use classify::classify;
 pub use cost::{CostError, CostReport};
 pub use effect::Effect;
@@ -213,9 +216,26 @@ pub fn compile(plan: &Plan, raw: &str) -> CompiledPlan {
     }
 }
 
+/// The digest an approval records for the mandate it was judged against.
+///
+/// Its own function so both the writer and the reader of an approval
+/// spell it the same way; a mismatch here would silently refuse every
+/// apply, which is a bad failure to debug.
+pub fn manifest_digest(src: &str) -> String {
+    sha256_hex(src)
+}
+
 pub(crate) fn sha256_hex(src: &str) -> String {
+    sha256_bytes(src.as_bytes())
+}
+
+/// The same digest over bytes rather than text.
+///
+/// A saved terraform plan is a binary artifact, not a document, so the
+/// text-shaped helper cannot hash the thing that actually gets applied.
+pub(crate) fn sha256_bytes(src: &[u8]) -> String {
     let mut h = Sha256::new();
-    h.update(src.as_bytes());
+    h.update(src);
     hex::encode(h.finalize())
 }
 
