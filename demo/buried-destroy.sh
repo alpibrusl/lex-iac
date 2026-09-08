@@ -130,5 +130,8 @@ prices wrongly too.
 The gate reads the plan. A provider that mutates outside its declared
 plan -- some do, on drift -- is invisible to any document reader, which
 is why `apply` runs inside a lex-os box rather than trusting the plan to
-be honest. That perimeter needs KVM and is not exercised here.
+be honest. That perimeter needs KVM, so it is not exercised by this
+script -- but it has been exercised: see docs/real-box.md, where the
+same binding refuses a substituted artifact before the box boots and
+then applies the approved one inside a real jailed microVM.
 TXT
