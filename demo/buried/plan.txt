@@ -1,0 +1,414 @@
+
+Terraform used the selected providers to generate the following execution
+plan. Resource actions are indicated with the following symbols:
+  + create
+  - destroy
+
+Terraform will perform the following actions:
+
+  # aws_cloudwatch_log_group.api will be created
+  + resource "aws_cloudwatch_log_group" "api" {
+      + arn               = (known after apply)
+      + id                = (known after apply)
+      + log_group_class   = (known after apply)
+      + name              = "/ecs/payments-api"
+      + name_prefix       = (known after apply)
+      + retention_in_days = 30
+      + skip_destroy      = false
+      + tags              = {
+          + "team" = "payments"
+        }
+      + tags_all          = {
+          + "team" = "payments"
+        }
+    }
+
+  # aws_cloudwatch_log_group.billing will be created
+  + resource "aws_cloudwatch_log_group" "billing" {
+      + arn               = (known after apply)
+      + id                = (known after apply)
+      + log_group_class   = (known after apply)
+      + name              = "/ecs/payments-billing"
+      + name_prefix       = (known after apply)
+      + retention_in_days = 30
+      + skip_destroy      = false
+      + tags              = {
+          + "team" = "payments"
+        }
+      + tags_all          = {
+          + "team" = "payments"
+        }
+    }
+
+  # aws_cloudwatch_log_group.exporter will be created
+  + resource "aws_cloudwatch_log_group" "exporter" {
+      + arn               = (known after apply)
+      + id                = (known after apply)
+      + log_group_class   = (known after apply)
+      + name              = "/ecs/payments-exporter"
+      + name_prefix       = (known after apply)
+      + retention_in_days = 30
+      + skip_destroy      = false
+      + tags              = {
+          + "team" = "payments"
+        }
+      + tags_all          = {
+          + "team" = "payments"
+        }
+    }
+
+  # aws_cloudwatch_log_group.gateway will be created
+  + resource "aws_cloudwatch_log_group" "gateway" {
+      + arn               = (known after apply)
+      + id                = (known after apply)
+      + log_group_class   = (known after apply)
+      + name              = "/ecs/payments-gateway"
+      + name_prefix       = (known after apply)
+      + retention_in_days = 30
+      + skip_destroy      = false
+      + tags              = {
+          + "team" = "payments"
+        }
+      + tags_all          = {
+          + "team" = "payments"
+        }
+    }
+
+  # aws_cloudwatch_log_group.notify will be created
+  + resource "aws_cloudwatch_log_group" "notify" {
+      + arn               = (known after apply)
+      + id                = (known after apply)
+      + log_group_class   = (known after apply)
+      + name              = "/ecs/payments-notify"
+      + name_prefix       = (known after apply)
+      + retention_in_days = 30
+      + skip_destroy      = false
+      + tags              = {
+          + "team" = "payments"
+        }
+      + tags_all          = {
+          + "team" = "payments"
+        }
+    }
+
+  # aws_cloudwatch_log_group.reports will be created
+  + resource "aws_cloudwatch_log_group" "reports" {
+      + arn               = (known after apply)
+      + id                = (known after apply)
+      + log_group_class   = (known after apply)
+      + name              = "/ecs/payments-reports"
+      + name_prefix       = (known after apply)
+      + retention_in_days = 30
+      + skip_destroy      = false
+      + tags              = {
+          + "team" = "payments"
+        }
+      + tags_all          = {
+          + "team" = "payments"
+        }
+    }
+
+  # aws_cloudwatch_log_group.scheduler will be created
+  + resource "aws_cloudwatch_log_group" "scheduler" {
+      + arn               = (known after apply)
+      + id                = (known after apply)
+      + log_group_class   = (known after apply)
+      + name              = "/ecs/payments-scheduler"
+      + name_prefix       = (known after apply)
+      + retention_in_days = 30
+      + skip_destroy      = false
+      + tags              = {
+          + "team" = "payments"
+        }
+      + tags_all          = {
+          + "team" = "payments"
+        }
+    }
+
+  # aws_cloudwatch_log_group.search will be created
+  + resource "aws_cloudwatch_log_group" "search" {
+      + arn               = (known after apply)
+      + id                = (known after apply)
+      + log_group_class   = (known after apply)
+      + name              = "/ecs/payments-search"
+      + name_prefix       = (known after apply)
+      + retention_in_days = 30
+      + skip_destroy      = false
+      + tags              = {
+          + "team" = "payments"
+        }
+      + tags_all          = {
+          + "team" = "payments"
+        }
+    }
+
+  # aws_cloudwatch_log_group.webhooks will be created
+  + resource "aws_cloudwatch_log_group" "webhooks" {
+      + arn               = (known after apply)
+      + id                = (known after apply)
+      + log_group_class   = (known after apply)
+      + name              = "/ecs/payments-webhooks"
+      + name_prefix       = (known after apply)
+      + retention_in_days = 30
+      + skip_destroy      = false
+      + tags              = {
+          + "team" = "payments"
+        }
+      + tags_all          = {
+          + "team" = "payments"
+        }
+    }
+
+  # aws_cloudwatch_log_group.worker will be created
+  + resource "aws_cloudwatch_log_group" "worker" {
+      + arn               = (known after apply)
+      + id                = (known after apply)
+      + log_group_class   = (known after apply)
+      + name              = "/ecs/payments-worker"
+      + name_prefix       = (known after apply)
+      + retention_in_days = 30
+      + skip_destroy      = false
+      + tags              = {
+          + "team" = "payments"
+        }
+      + tags_all          = {
+          + "team" = "payments"
+        }
+    }
+
+  # aws_db_instance.payments_prod will be destroyed
+  # (because aws_db_instance.payments_prod is not in configuration)
+  - resource "aws_db_instance" "payments_prod" {
+      - allocated_storage       = 512 -> null
+      - backup_retention_period = 7 -> null
+      - deletion_protection     = false -> null
+      - engine                  = "postgres" -> null
+      - id                      = "payments-prod" -> null
+      - identifier              = "payments-prod" -> null
+      - instance_class          = "db.r6g.2xlarge" -> null
+      - multi_az                = true -> null
+      - skip_final_snapshot     = true -> null
+      - storage_encrypted       = true -> null
+    }
+
+  # aws_ecs_task_definition.api will be created
+  + resource "aws_ecs_task_definition" "api" {
+      + arn                    = (known after apply)
+      + arn_without_revision   = (known after apply)
+      + container_definitions  = jsonencode([])
+      + enable_fault_injection = (known after apply)
+      + family                 = "payments-api"
+      + id                     = (known after apply)
+      + network_mode           = (known after apply)
+      + revision               = (known after apply)
+      + skip_destroy           = false
+      + tags                   = {
+          + "rev"  = "2026-09-08"
+          + "team" = "payments"
+        }
+      + tags_all               = {
+          + "rev"  = "2026-09-08"
+          + "team" = "payments"
+        }
+      + track_latest           = false
+    }
+
+  # aws_ecs_task_definition.billing will be created
+  + resource "aws_ecs_task_definition" "billing" {
+      + arn                    = (known after apply)
+      + arn_without_revision   = (known after apply)
+      + container_definitions  = jsonencode([])
+      + enable_fault_injection = (known after apply)
+      + family                 = "payments-billing"
+      + id                     = (known after apply)
+      + network_mode           = (known after apply)
+      + revision               = (known after apply)
+      + skip_destroy           = false
+      + tags                   = {
+          + "rev"  = "2026-09-08"
+          + "team" = "payments"
+        }
+      + tags_all               = {
+          + "rev"  = "2026-09-08"
+          + "team" = "payments"
+        }
+      + track_latest           = false
+    }
+
+  # aws_ecs_task_definition.exporter will be created
+  + resource "aws_ecs_task_definition" "exporter" {
+      + arn                    = (known after apply)
+      + arn_without_revision   = (known after apply)
+      + container_definitions  = jsonencode([])
+      + enable_fault_injection = (known after apply)
+      + family                 = "payments-exporter"
+      + id                     = (known after apply)
+      + network_mode           = (known after apply)
+      + revision               = (known after apply)
+      + skip_destroy           = false
+      + tags                   = {
+          + "rev"  = "2026-09-08"
+          + "team" = "payments"
+        }
+      + tags_all               = {
+          + "rev"  = "2026-09-08"
+          + "team" = "payments"
+        }
+      + track_latest           = false
+    }
+
+  # aws_ecs_task_definition.gateway will be created
+  + resource "aws_ecs_task_definition" "gateway" {
+      + arn                    = (known after apply)
+      + arn_without_revision   = (known after apply)
+      + container_definitions  = jsonencode([])
+      + enable_fault_injection = (known after apply)
+      + family                 = "payments-gateway"
+      + id                     = (known after apply)
+      + network_mode           = (known after apply)
+      + revision               = (known after apply)
+      + skip_destroy           = false
+      + tags                   = {
+          + "rev"  = "2026-09-08"
+          + "team" = "payments"
+        }
+      + tags_all               = {
+          + "rev"  = "2026-09-08"
+          + "team" = "payments"
+        }
+      + track_latest           = false
+    }
+
+  # aws_ecs_task_definition.notify will be created
+  + resource "aws_ecs_task_definition" "notify" {
+      + arn                    = (known after apply)
+      + arn_without_revision   = (known after apply)
+      + container_definitions  = jsonencode([])
+      + enable_fault_injection = (known after apply)
+      + family                 = "payments-notify"
+      + id                     = (known after apply)
+      + network_mode           = (known after apply)
+      + revision               = (known after apply)
+      + skip_destroy           = false
+      + tags                   = {
+          + "rev"  = "2026-09-08"
+          + "team" = "payments"
+        }
+      + tags_all               = {
+          + "rev"  = "2026-09-08"
+          + "team" = "payments"
+        }
+      + track_latest           = false
+    }
+
+  # aws_ecs_task_definition.reports will be created
+  + resource "aws_ecs_task_definition" "reports" {
+      + arn                    = (known after apply)
+      + arn_without_revision   = (known after apply)
+      + container_definitions  = jsonencode([])
+      + enable_fault_injection = (known after apply)
+      + family                 = "payments-reports"
+      + id                     = (known after apply)
+      + network_mode           = (known after apply)
+      + revision               = (known after apply)
+      + skip_destroy           = false
+      + tags                   = {
+          + "rev"  = "2026-09-08"
+          + "team" = "payments"
+        }
+      + tags_all               = {
+          + "rev"  = "2026-09-08"
+          + "team" = "payments"
+        }
+      + track_latest           = false
+    }
+
+  # aws_ecs_task_definition.scheduler will be created
+  + resource "aws_ecs_task_definition" "scheduler" {
+      + arn                    = (known after apply)
+      + arn_without_revision   = (known after apply)
+      + container_definitions  = jsonencode([])
+      + enable_fault_injection = (known after apply)
+      + family                 = "payments-scheduler"
+      + id                     = (known after apply)
+      + network_mode           = (known after apply)
+      + revision               = (known after apply)
+      + skip_destroy           = false
+      + tags                   = {
+          + "rev"  = "2026-09-08"
+          + "team" = "payments"
+        }
+      + tags_all               = {
+          + "rev"  = "2026-09-08"
+          + "team" = "payments"
+        }
+      + track_latest           = false
+    }
+
+  # aws_ecs_task_definition.search will be created
+  + resource "aws_ecs_task_definition" "search" {
+      + arn                    = (known after apply)
+      + arn_without_revision   = (known after apply)
+      + container_definitions  = jsonencode([])
+      + enable_fault_injection = (known after apply)
+      + family                 = "payments-search"
+      + id                     = (known after apply)
+      + network_mode           = (known after apply)
+      + revision               = (known after apply)
+      + skip_destroy           = false
+      + tags                   = {
+          + "rev"  = "2026-09-08"
+          + "team" = "payments"
+        }
+      + tags_all               = {
+          + "rev"  = "2026-09-08"
+          + "team" = "payments"
+        }
+      + track_latest           = false
+    }
+
+  # aws_ecs_task_definition.webhooks will be created
+  + resource "aws_ecs_task_definition" "webhooks" {
+      + arn                    = (known after apply)
+      + arn_without_revision   = (known after apply)
+      + container_definitions  = jsonencode([])
+      + enable_fault_injection = (known after apply)
+      + family                 = "payments-webhooks"
+      + id                     = (known after apply)
+      + network_mode           = (known after apply)
+      + revision               = (known after apply)
+      + skip_destroy           = false
+      + tags                   = {
+          + "rev"  = "2026-09-08"
+          + "team" = "payments"
+        }
+      + tags_all               = {
+          + "rev"  = "2026-09-08"
+          + "team" = "payments"
+        }
+      + track_latest           = false
+    }
+
+  # aws_ecs_task_definition.worker will be created
+  + resource "aws_ecs_task_definition" "worker" {
+      + arn                    = (known after apply)
+      + arn_without_revision   = (known after apply)
+      + container_definitions  = jsonencode([])
+      + enable_fault_injection = (known after apply)
+      + family                 = "payments-worker"
+      + id                     = (known after apply)
+      + network_mode           = (known after apply)
+      + revision               = (known after apply)
+      + skip_destroy           = false
+      + tags                   = {
+          + "rev"  = "2026-09-08"
+          + "team" = "payments"
+        }
+      + tags_all               = {
+          + "rev"  = "2026-09-08"
+          + "team" = "payments"
+        }
+      + track_latest           = false
+    }
+
+Plan: 20 to add, 0 to change, 1 to destroy.
