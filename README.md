@@ -413,18 +413,40 @@ lex-iac audit verify --log log.json --trusted-key <public-hex>
 ```
 
 ```
-chain:  OK — 2 entries, head sha256:a393a9f4…
-seals:  NOT CHECKED — 2 of 2 entries carry one.        # without a key
+chain:  OK — 3 entries, head sha256:6e3bd809…
+seals:  NOT CHECKED — 3 of 3 entries carry one.        # without a key
+length: NOT CHECKED — without a checkpoint, entries deleted from the end
+        are indistinguishable from entries never written.
 
 REFUSED — the seals do not hold.                        # on a forgery
   audit seal invalid at seq 1: seal does not verify against the entry's
   actual contents
 ```
 
-`audit verify` reports the two walls **separately**, and says
-`NOT CHECKED` rather than `OK` when given no key: a log whose seals
-nobody checked is not a log whose seals passed. Sealing is opt-in, and a
-run writing an unsealed log says so on the way past.
+`audit verify` reports **three walls separately**, and says `NOT CHECKED`
+rather than `OK` for the ones it was given nothing to check with: a log
+whose seals nobody checked is not a log whose seals passed, and absence
+of a wall has to read as absence.
+
+The third wall is length. The chain catches an edited payload and the
+seals catch someone who edits *and* recomputes the hashes; neither can
+see a **deletion**, because every entry left after a truncation is
+genuine and the chain that remains is intact. Only a commitment made
+while the missing entry still existed can contradict that:
+
+```sh
+lex-iac check … --audit-out log.json --checkpoint-out cp.json --audit-key-file audit.key
+lex-iac audit verify --log log.json --trusted-key <hex> --checkpoint cp.json
+```
+
+```
+REFUSED — audit checkpoint: chain has 2 entries but was checkpointed at 3
+          — 1 entr(y/ies) have been truncated from the tail
+```
+
+Keep the checkpoint somewhere the log's editor cannot reach; one stored
+beside the log is deleted in the same motion as the entry it would have
+testified about.
 
 **What a seal does not do: make `--signer` true.** That flag is a claim
 typed on a command line, and nothing upstream of this gate
@@ -435,6 +457,50 @@ Sealing raises the record from *unattributable and editable* to
 *attributable to this gate and tamper-evident*. A real improvement, and
 a different claim.
 
+## The approval names the artifact
+
+`check` used to read a plan JSON someone handed it, and `apply` ran
+`terraform apply tfplan` against a saved plan named separately. Nothing
+connected the two, so the gate could accept plan A while terraform
+applied plan B.
+
+The fix is not to check harder — it is to stop having two artifacts.
+`--tfplan` takes the **saved binary plan** and derives the JSON from it
+with terraform's own `show -json`, so the document the gate reasons over
+is a view of the bytes that will be applied:
+
+```sh
+lex-iac check --grant payments.json --tfplan tfplan --approval-out approval.json
+```
+
+```
+plan:      sha256:df0eacf8…
+artifact:  sha256:1ff100ee…  (the saved plan this JSON was read from)
+ACCEPTED — every effect is inside the grant.
+approval:  written to approval.json
+```
+
+The approval records the artifact's digest, and a later apply is held to
+it:
+
+```
+REFUSED — the plan being applied is not the plan that was approved.
+  approved: sha256:68f2f1cf…
+  on disk:  sha256:516db2ef…
+Nothing was applied. The box was never booted.
+```
+
+**The case this exists for**: two plans that both pass the gate on their
+merits. Nothing is wrong with the second — a re-check would admit it. It
+simply is not the one that was approved, and only a digest can tell them
+apart.
+
+`--plan <json>` still works for callers deriving the JSON elsewhere.
+Those print `artifact: unbound` and cannot write an approval, which is
+the honest description of what they hold. `--tfplan` needs terraform on
+PATH and a working directory where `init` has been run, because
+`show -json` reads the plan through the provider plugins.
+
 ## Applying inside the box
 
 The gate decides; something else applies. Milestone 6 makes that
@@ -444,9 +510,15 @@ bounded by a wall rather than by the plan's honesty.
 
 ```sh
 sudo bash demo/build-box.sh          # a guest image with terraform + the planned dir
-lex-iac apply --grant payments.json --plan plan.json \
-              --box-rootfs demo/assets/box.ext4 --dry-run
+lex-iac apply --grant payments.json --tfplan tfplan --approval approval.json \
+              --box-rootfs demo/assets/box.ext4
 ```
+
+This has been run, not only described: [`docs/real-box.md`](docs/real-box.md)
+records an apply on a KVM host — `perimeter: "firecracker"`,
+`security_boundary: true`, `Apply complete! Resources: 1 added` — plus a
+substituted artifact being refused before the box booted, and the two
+refusals the manifest's own consistency check raised on the way.
 
 **One manifest, two enforcement points.** The grant the gate checks is a
 `lex_os_manifest::Manifest`, which is exactly what `lex-os exec` takes —
@@ -492,14 +564,27 @@ box exited 0
   belong inside the box or behind a host-side proxy is a real decision
   with real blast radius, and not one a demo should make by defaulting.
 
-### Not yet
+### The two chains are linked
 
-The gate's audit chain and the box's session are **two chains**, not one.
-lex-os can seed a session's log from a prior decision (`with_seed_audit`)
-so both live on one hash chain, but that is an in-process API and this
-hands off across a subprocess. Until they are joined, `--audit-out` and
-`--box-audit-out` are related by nothing stronger than the operator
-keeping both.
+`apply` passes the gate's chain head to the box, which records it as its
+session's first entry:
+
+```
+gate chain: 2 entries, head sha256:225964ae…
+box  chain: 7 entries, first entry kind = authorised_by
+  domain  lex.iac.audit.v1
+  head    sha256:225964ae…
+```
+
+A hash cannot be quoted before the thing it commits to exists, so a
+session naming one demonstrably began **after** that decision. That is
+the whole claim: not that the decision's record survives (the ledger
+answers that), and not that this was the only session it authorised.
+
+The head is read back from the chain `check` wrote rather than
+recomputed, so a run without `--audit-out` has no persisted decision to
+point at, passes no authorisation, and the session correctly claims
+none.
 
 ## Honest cautions
 
@@ -533,11 +618,13 @@ keeping both.
    who they said.** `--signer` is asserted by whoever runs the CLI, and
    sealing does not change that — it makes the *record* attributable and
    tamper-evident, which is a different and smaller claim than
-   authenticating a submitter. It also does not stop the file being
-   **deleted**: each check writes its own chain, so a missing log leaves
-   no gap to notice. lex-k8s hit the same wall and answered it with a
-   running ledger of decision heads (alpibrusl/lex-k8s#13); nothing
-   equivalent exists here.
+   authenticating a submitter. Deletion is answered separately, by
+   `--ledger`: one long-lived chain witnessing every decision, so a
+   removed log becomes a head with nothing behind it. `audit reconcile`
+   checks both directions, since a witnessed head with no file is a
+   deletion and a file no witness names is a plant. A ledger kept beside
+   the decisions it witnesses still dies to the same `rm -rf` — its
+   value is that a checkpoint over it makes that detectable.
 7. **Narrowing a facet is subsumption; admitting an effect is not.** A
    parent granting `aws.rds.*` does let a child inherit
    `aws.rds.delete` — the child is genuinely no wider than its parent.
