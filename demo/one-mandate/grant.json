@@ -23,7 +23,8 @@
   "facets": {
     "infra": {
       "allow": [
-        "aws.ecs.*"
+        "aws.ecs.*",
+        "aws.cloudwatch.*"
       ]
     }
   }

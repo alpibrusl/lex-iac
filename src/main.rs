@@ -31,13 +31,16 @@ usage:
   lex-iac check --grant <manifest.json> (--tfplan <tfplan> | --plan <plan.json>)
                 [--cost <cost.json>]
                 [--signer <id>] [--trusted-keys <keyring.json>]
-                [--audit-out <log.json>] [--checkpoint-out <cp.json>] [--json]
+                [--audit-out <log.json>] [--checkpoint-out <cp.json>]
+                [--ledger <ledger.json>] [--json]
                 [--audit-key <hex> | --audit-key-file <path>]
   lex-iac apply --grant <manifest.json> --plan <plan.json> --box-rootfs <box.ext4>
                 [--box-kernel <vmlinux>] [--work-dir /work] [--tfplan tfplan]
                 [--jail-uid <n>] [--jail-gid <n>] [--lex-os <path>] [--dry-run]
                 [every `check` flag too]
   lex-iac manifest narrow --parent <manifest.json> --child <manifest.json>
+  lex-iac audit reconcile --ledger <ledger.json> --decisions <dir>
+                       [--trusted-key <hex>]...
   lex-iac audit verify --log <log.json> [--trusted-key <hex>]...
                        [--checkpoint <cp.json>]
   lex-iac audit pubkey [--key <hex> | --key-file <path>]
@@ -93,6 +96,7 @@ fn main() -> ExitCode {
         ["check", rest @ ..] => cmd_check(rest),
         ["manifest", "narrow", rest @ ..] => cmd_narrow(rest),
         ["apply", rest @ ..] => cmd_apply(rest),
+        ["audit", "reconcile", rest @ ..] => cmd_audit_reconcile(rest),
         ["audit", "verify", rest @ ..] => cmd_audit_verify(rest),
         ["audit", "pubkey", rest @ ..] => cmd_audit_pubkey(rest),
         ["--help"] | ["-h"] | [] => {
@@ -332,6 +336,40 @@ fn cmd_check(args: &[&str]) -> ExitCode {
         if let Err(e) = std::fs::write(path, json) {
             eprintln!("could not write the audit log {path}: {e}");
             return ExitCode::from(2);
+        }
+    }
+
+    // The witness that survives the file (#18).
+    //
+    // A checkpoint proves a chain is no shorter than it was. Nothing
+    // counts the chains, so deleting a whole decision log leaves no gap
+    // — and that is the easier attack. One long-lived ledger, appended
+    // to after every decision, turns it into a head with nothing behind
+    // it.
+    if let Some(path) = flag(args, "--ledger") {
+        let event = lex_iac::ledger::LedgerEvent::PlanDecided {
+            subject: manifest.goal.description.clone(),
+            verdict: match &decision.verdict {
+                lex_iac::Verdict::Allow => "accepted".into(),
+                _ => "refused".into(),
+            },
+            decision_head: decision.audit.head(),
+            decision_entries: decision.audit.len() as u64,
+            plan_sha256: decision.plan.plan_sha256.clone(),
+            tfplan_sha256: tfplan_sha256.clone(),
+            signer: audit_key
+                .as_ref()
+                .map(|k| hex::encode(k.verifying_key().to_bytes())),
+        };
+        match lex_iac::ledger::witness(std::path::Path::new(path), event, audit_key.as_ref()) {
+            Ok(head) => println!(
+                "ledger:    witnessed in {path}, head sha256:{}",
+                &head[..16.min(head.len())]
+            ),
+            Err(e) => {
+                eprintln!("could not witness the decision: {e}");
+                return ExitCode::from(2);
+            }
         }
     }
 
@@ -714,6 +752,92 @@ fn checkpoint_verdict(
 ///
 /// Supplying no key checks no seals, and says so rather than passing.
 /// Supplying no checkpoint checks no length, and says that too.
+/// `audit reconcile` — hold the ledger and the decision files to each
+/// other.
+///
+/// Both directions, because neither is provable from the other side
+/// alone: a witnessed head with no file is a deletion, and a file no
+/// witness names is a plant — or a ledger that lost its own tail, which
+/// is the same evidence read the other way round.
+fn cmd_audit_reconcile(args: &[&str]) -> ExitCode {
+    let (Some(ledger_path), Some(dir)) = (flag(args, "--ledger"), flag(args, "--decisions")) else {
+        eprintln!("audit reconcile needs --ledger and --decisions\n\n{USAGE}");
+        return ExitCode::from(2);
+    };
+    let src = match read(ledger_path) {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    let ledger: lex_iac::ledger::Ledger = match Chain::from_json(&src) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("could not read the ledger {ledger_path}: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    if let Err(e) = ledger.verify() {
+        println!("REFUSED — the ledger's own chain is broken.");
+        println!("  {e}");
+        return ExitCode::from(8);
+    }
+
+    // A ledger that does not begin with `ledger_opened` has lost its
+    // head, whatever its hashes say: the remaining entries chain to each
+    // other perfectly well.
+    let opened_first = matches!(
+        ledger.entries().first().map(|e| &e.event),
+        Some(lex_iac::ledger::LedgerEvent::LedgerOpened { .. })
+    );
+    if !opened_first {
+        println!("REFUSED — the ledger does not begin where a ledger begins.");
+        println!(
+            "  Its first entry is not `ledger_opened`, so entries have been removed from \n               the front. What remains is internally consistent, which is the point."
+        );
+        return ExitCode::from(8);
+    }
+
+    // Every decision chain in the directory, by head.
+    let mut heads = Vec::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("could not read the decisions directory {dir}: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Ok(chain) = Chain::<PlanEvent>::from_json(&text) {
+            heads.push(chain.head());
+        }
+    }
+
+    let r = lex_iac::ledger::reconcile(&ledger, &heads);
+    if r.agrees() {
+        println!(
+            "ledger:  OK — {} decision(s) witnessed, {} file(s), and they agree.",
+            r.witnessed, r.files
+        );
+        return ExitCode::from(0);
+    }
+    println!("REFUSED — the ledger and the decision files disagree.");
+    for h in &r.missing {
+        println!("  witnessed but absent: sha256:{h}");
+        println!("    a decision the ledger recorded has no file behind it — it was deleted");
+    }
+    for h in &r.unwitnessed {
+        println!("  present but unwitnessed: sha256:{h}");
+        println!("    a decision file no witness names — planted, or the ledger lost its tail");
+    }
+    ExitCode::from(8)
+}
+
 fn cmd_audit_verify(args: &[&str]) -> ExitCode {
     let Some(path) = flag(args, "--log") else {
         eprintln!("audit verify needs --log\n\n{USAGE}");
@@ -726,6 +850,18 @@ fn cmd_audit_verify(args: &[&str]) -> ExitCode {
     let log: Chain<PlanEvent> = match Chain::from_json(&src) {
         Ok(l) => l,
         Err(e) => {
+            // A ledger is a chain too, and reaching for `audit verify`
+            // on one is the obvious mistake. The domain separation that
+            // makes the two unmixable also makes the serde error
+            // unreadable, so name the likely cause.
+            if src.contains("ledger_opened") {
+                eprintln!(
+                    "{path} is a ledger, not a decision log — its entries are witnesses \
+                     rather than verdicts.\n\n  \
+                     lex-iac audit reconcile --ledger {path} --decisions <dir>"
+                );
+                return ExitCode::from(2);
+            }
             eprintln!("could not read the audit log {path}: {e}");
             return ExitCode::from(2);
         }

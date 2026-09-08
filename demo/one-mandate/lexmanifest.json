@@ -12,7 +12,9 @@
         "postgres.payments.svc",
         "api.stripe.com:443"
       ],
-      "secrets": [],
+      "secrets": [
+        "payments-db"
+      ],
       "capabilities": [],
       "hostPath": false,
       "privileged": false,
