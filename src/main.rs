@@ -944,6 +944,18 @@ fn cmd_audit_verify(args: &[&str]) -> ExitCode {
     }
 }
 
+/// `<domain>:<head>` for the decision chain at `path`, if there is one.
+///
+/// `None` when no chain was written, or when it cannot be read: an
+/// unlinked session is the truthful outcome there, and inventing a head
+/// would be worse than admitting the pair is unlinked.
+fn box_audit_link(path: Option<&str>) -> Option<String> {
+    let path = path?;
+    let src = std::fs::read_to_string(path).ok()?;
+    let chain: Chain<PlanEvent> = Chain::from_json(&src).ok()?;
+    Some(format!("{}:{}", lex_iac::PLAN_AUDIT_DOMAIN, chain.head()))
+}
+
 /// `apply` — gate the plan, then apply it inside the box.
 ///
 /// The order is the whole point, and it is structural rather than
@@ -1073,7 +1085,18 @@ fn cmd_apply(args: &[&str]) -> ExitCode {
         jail_gid: flag(args, "--jail-gid").and_then(|v| v.parse().ok()),
     };
     let box_audit = flag(args, "--box-audit-out");
-    let argv = lex_iac::apply_argv(&spec, grant_path, box_audit);
+    // The link between the two records (#19).
+    //
+    // Read back from the chain `cmd_check` just wrote, rather than
+    // recomputed here. Two reasons. It is the head of the record that
+    // actually exists on disk, not of one reconstructed from the same
+    // inputs — those can differ, and a link to a decision nobody kept is
+    // not evidence of anything. And it makes the dependency honest: a
+    // run without `--audit-out` has no persisted decision to point at,
+    // so it passes no authorisation and the session correctly claims
+    // none.
+    let authorisation = box_audit_link(flag(args, "--audit-out"));
+    let argv = lex_iac::apply_argv(&spec, grant_path, box_audit, authorisation.as_deref());
 
     println!();
     println!("ALLOWED — applying inside the box.");
