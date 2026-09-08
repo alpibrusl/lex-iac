@@ -119,8 +119,16 @@ pub enum PlanEvent {
     },
 }
 
+/// The payload domain of this gate's decision chain.
+///
+/// Public because a chain head travels without its vocabulary, and
+/// anything quoting one has to say which log it heads — a bare hex
+/// string could belong to any of them. See `lex-os exec
+/// --authorised-by <domain>:<head>`.
+pub const PLAN_AUDIT_DOMAIN: &str = "lex.iac.audit.v1";
+
 impl ChainPayload for PlanEvent {
-    const DOMAIN: &'static [u8] = b"lex.iac.audit.v1";
+    const DOMAIN: &'static [u8] = PLAN_AUDIT_DOMAIN.as_bytes();
 }
 
 /// The gate could not run.

@@ -49,7 +49,9 @@ pub use classify::classify;
 pub use cost::{CostError, CostReport};
 pub use effect::Effect;
 pub use facet::{Denial, Gravity, InfraFacet, Scope};
-pub use gate::{check, check_sealed, Decision, GateError, PlanEvent, Refusal, Verdict, Wall};
+pub use gate::{
+    check, check_sealed, Decision, GateError, PlanEvent, Refusal, Verdict, Wall, PLAN_AUDIT_DOMAIN,
+};
 pub use manifest::{infra_facet, narrow, registry};
 pub use plan::{Plan, PlanError, Verb};
 pub use resource::ResourceKey;

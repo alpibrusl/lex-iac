@@ -109,7 +109,20 @@ pub fn resolve_box_path(what: &str, p: &Path) -> Result<PathBuf, String> {
 /// test on a machine with no KVM — which is every machine this repo's CI
 /// runs on. The one place this could go wrong unnoticed is the boundary
 /// between the two tools, so that boundary is what the test pins.
-pub fn apply_argv(spec: &BoxSpec, manifest: &str, audit_out: Option<&str>) -> Vec<String> {
+/// `authorised_by` links the box's session to the decision that let it
+/// run (#19): the gate's chain head, with the vocabulary it heads.
+///
+/// Without it the two records are related by the filenames an operator
+/// happened to keep together. With it, a reader holding only the
+/// session can follow it back — and because a hash cannot be quoted
+/// before the thing it commits to exists, the session provably came
+/// after the decision.
+pub fn apply_argv(
+    spec: &BoxSpec,
+    manifest: &str,
+    audit_out: Option<&str>,
+    authorised_by: Option<&str>,
+) -> Vec<String> {
     let mut v: Vec<String> = vec![
         spec.lex_os.clone(),
         "exec".into(),
@@ -128,6 +141,10 @@ pub fn apply_argv(spec: &BoxSpec, manifest: &str, audit_out: Option<&str>) -> Ve
     if let Some(p) = audit_out {
         v.push("--audit-out".into());
         v.push(p.into());
+    }
+    if let Some(a) = authorised_by {
+        v.push("--authorised-by".into());
+        v.push(a.into());
     }
     if let Some(uid) = spec.jail_uid {
         v.push("--jail-uid".into());
@@ -203,7 +220,7 @@ mod tests {
     /// grant.
     #[test]
     fn the_box_is_confined_by_the_manifest_the_gate_checked() {
-        let argv = apply_argv(&BoxSpec::default(), "payments.json", None);
+        let argv = apply_argv(&BoxSpec::default(), "payments.json", None, None);
         let i = argv
             .iter()
             .position(|a| a == "--manifest")
@@ -216,7 +233,7 @@ mod tests {
     /// a document nobody checked.
     #[test]
     fn the_box_applies_a_planned_document_and_cannot_replan() {
-        let argv = apply_argv(&BoxSpec::default(), "m.json", None);
+        let argv = apply_argv(&BoxSpec::default(), "m.json", None, None);
         let cmd = &argv[argv.iter().position(|a| a == "--").expect("--") + 1..];
         assert_eq!(cmd[0], "/usr/bin/terraform");
         assert!(cmd.contains(&"apply".to_string()));
@@ -236,7 +253,7 @@ mod tests {
 
     #[test]
     fn optional_parts_are_omitted_rather_than_defaulted() {
-        let argv = apply_argv(&BoxSpec::default(), "m.json", None);
+        let argv = apply_argv(&BoxSpec::default(), "m.json", None, None);
         for absent in ["--kernel", "--audit-out", "--jail-uid", "--jail-gid"] {
             assert!(
                 !argv.contains(&absent.to_string()),
@@ -249,7 +266,7 @@ mod tests {
             jail_gid: Some(108),
             ..BoxSpec::default()
         };
-        let argv = apply_argv(&spec, "m.json", Some("audit.json"));
+        let argv = apply_argv(&spec, "m.json", Some("audit.json"), None);
         for present in ["--kernel", "--audit-out", "--jail-uid", "--jail-gid"] {
             assert!(
                 argv.contains(&present.to_string()),
@@ -266,7 +283,7 @@ mod tests {
             kernel: Some(PathBuf::from("k")),
             ..BoxSpec::default()
         };
-        let argv = apply_argv(&spec, "m.json", Some("a.json"));
+        let argv = apply_argv(&spec, "m.json", Some("a.json"), None);
         let sep = argv.iter().position(|a| a == "--").expect("--");
         assert!(argv[..sep].iter().all(|a| a != "/usr/bin/terraform"));
         assert!(argv[sep + 1..].iter().all(|a| !a.starts_with("--manifest")));
@@ -397,6 +414,50 @@ impl Approval {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+
+    /// The link is a flag on the argv, so it survives the process
+    /// boundary the two records live on either side of.
+    #[test]
+    fn the_authorisation_reaches_the_box() {
+        let argv = apply_argv(
+            &BoxSpec::default(),
+            "m.json",
+            None,
+            Some("lex.iac.audit.v1:9f2c"),
+        );
+        let i = argv
+            .iter()
+            .position(|a| a == "--authorised-by")
+            .expect("the box is told what authorised it");
+        assert_eq!(argv[i + 1], "lex.iac.audit.v1:9f2c");
+    }
+
+    /// And it stays on the lex-os side of the `--`, not among the
+    /// arguments to terraform.
+    #[test]
+    fn the_authorisation_is_a_lex_os_flag_not_a_terraform_one() {
+        let argv = apply_argv(&BoxSpec::default(), "m.json", None, Some("d:aa"));
+        let sep = argv.iter().position(|a| a == "--").expect("a separator");
+        let flag = argv.iter().position(|a| a == "--authorised-by").unwrap();
+        assert!(
+            flag < sep,
+            "terraform would be handed a flag it has never heard of"
+        );
+    }
+
+    /// A run with nothing to point at passes nothing. An unlinked
+    /// session is the truthful outcome, and inventing a head would be
+    /// worse than admitting the pair is unlinked.
+    #[test]
+    fn no_decision_means_no_claim() {
+        let argv = apply_argv(&BoxSpec::default(), "m.json", None, None);
+        assert!(!argv.iter().any(|a| a == "--authorised-by"));
     }
 }
 
