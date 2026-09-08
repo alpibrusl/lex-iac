@@ -1,0 +1,34 @@
+# The payments team's mandate. Written once.
+#
+# Two gates read this: the Terraform gate (lex-iac) and the Kubernetes
+# admission wall (lex-k8s). They enforce it at different boundaries and
+# understand different verbs, but there is no second copy of the mandate
+# for the two to disagree about -- which is the usual failure. A policy
+# engine per surface means a rule tightened in one place and forgotten
+# in the other, and nothing anywhere that can tell you.
+team: payments
+goal: serve and operate the payments API
+
+# What the team may reach, wherever it runs.
+egress:
+  - postgres.payments.svc
+  - api.stripe.com:443
+secrets:
+  - payments-db
+
+# What a workload of theirs may be. (Kubernetes reads this.)
+pod:
+  imagePrefixes: ["registry.internal/"]
+  privileged: false
+  hostPath: false
+  hostNamespaces: false
+  capabilities: []
+
+# What their infrastructure changes may do. (Terraform reads this.)
+infra:
+  allow:
+    - aws.ecs.*
+    - aws.cloudwatch.*
+
+budget:
+  max_money_cents: 5000

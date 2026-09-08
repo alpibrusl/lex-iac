@@ -1,0 +1,95 @@
+{
+  "version": "0.2",
+  "currency": "USD",
+  "projects": [
+    {
+      "name": "payments",
+      "diff": {
+        "totalMonthlyCost": "18.50",
+        "resources": [
+          {
+            "name": "aws_cloudwatch_log_group.api",
+            "monthlyCost": "1.85"
+          },
+          {
+            "name": "aws_cloudwatch_log_group.billing",
+            "monthlyCost": "1.85"
+          },
+          {
+            "name": "aws_cloudwatch_log_group.exporter",
+            "monthlyCost": "1.85"
+          },
+          {
+            "name": "aws_cloudwatch_log_group.gateway",
+            "monthlyCost": "1.85"
+          },
+          {
+            "name": "aws_cloudwatch_log_group.notify",
+            "monthlyCost": "1.85"
+          },
+          {
+            "name": "aws_cloudwatch_log_group.reports",
+            "monthlyCost": "1.85"
+          },
+          {
+            "name": "aws_cloudwatch_log_group.scheduler",
+            "monthlyCost": "1.85"
+          },
+          {
+            "name": "aws_cloudwatch_log_group.search",
+            "monthlyCost": "1.85"
+          },
+          {
+            "name": "aws_cloudwatch_log_group.webhooks",
+            "monthlyCost": "1.85"
+          },
+          {
+            "name": "aws_cloudwatch_log_group.worker",
+            "monthlyCost": "1.85"
+          },
+          {
+            "name": "aws_ecs_task_definition.api",
+            "monthlyCost": "0.00"
+          },
+          {
+            "name": "aws_ecs_task_definition.billing",
+            "monthlyCost": "0.00"
+          },
+          {
+            "name": "aws_ecs_task_definition.exporter",
+            "monthlyCost": "0.00"
+          },
+          {
+            "name": "aws_ecs_task_definition.gateway",
+            "monthlyCost": "0.00"
+          },
+          {
+            "name": "aws_ecs_task_definition.notify",
+            "monthlyCost": "0.00"
+          },
+          {
+            "name": "aws_ecs_task_definition.reports",
+            "monthlyCost": "0.00"
+          },
+          {
+            "name": "aws_ecs_task_definition.scheduler",
+            "monthlyCost": "0.00"
+          },
+          {
+            "name": "aws_ecs_task_definition.search",
+            "monthlyCost": "0.00"
+          },
+          {
+            "name": "aws_ecs_task_definition.webhooks",
+            "monthlyCost": "0.00"
+          },
+          {
+            "name": "aws_ecs_task_definition.worker",
+            "monthlyCost": "0.00"
+          }
+        ]
+      }
+    }
+  ],
+  "diffTotalMonthlyCost": "18.50"
+}

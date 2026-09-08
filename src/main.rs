@@ -28,9 +28,10 @@ use lex_iac::{
 
 const USAGE: &str = "\
 usage:
-  lex-iac check --grant <manifest.json> --plan <plan.json> [--cost <cost.json>]
+  lex-iac check --grant <manifest.json> (--tfplan <tfplan> | --plan <plan.json>)
+                [--cost <cost.json>]
                 [--signer <id>] [--trusted-keys <keyring.json>]
-                [--audit-out <log.json>] [--json]
+                [--audit-out <log.json>] [--checkpoint-out <cp.json>] [--json]
                 [--audit-key <hex> | --audit-key-file <path>]
   lex-iac apply --grant <manifest.json> --plan <plan.json> --box-rootfs <box.ext4>
                 [--box-kernel <vmlinux>] [--work-dir /work] [--tfplan tfplan]
@@ -38,6 +39,7 @@ usage:
                 [every `check` flag too]
   lex-iac manifest narrow --parent <manifest.json> --child <manifest.json>
   lex-iac audit verify --log <log.json> [--trusted-key <hex>]...
+                       [--checkpoint <cp.json>]
   lex-iac audit pubkey [--key <hex> | --key-file <path>]
 
 --cost takes an estimator's JSON (Infracost today). Without it the spend
@@ -152,15 +154,43 @@ fn read(path: &str) -> Result<String, ExitCode> {
 }
 
 fn cmd_check(args: &[&str]) -> ExitCode {
-    let (Some(grant_path), Some(plan_path)) = (flag(args, "--grant"), flag(args, "--plan")) else {
-        eprintln!("check needs --grant and --plan\n\n{USAGE}");
+    let Some(grant_path) = flag(args, "--grant") else {
+        eprintln!("check needs --grant\n\n{USAGE}");
         return ExitCode::from(2);
     };
     let as_json = args.contains(&"--json");
 
-    let (grant_src, plan_src) = match (read(grant_path), read(plan_path)) {
-        (Ok(g), Ok(p)) => (g, p),
-        (Err(c), _) | (_, Err(c)) => return c,
+    // Two ways to name the plan, and they are not equivalent.
+    //
+    // `--tfplan` names the saved binary plan — the artifact terraform
+    // will actually apply — and the JSON is *derived* from it here, so
+    // the document the gate reasons about is a view of those bytes.
+    // `--plan` takes a JSON someone else produced, which is still
+    // supported (an estimator or a CI step may already have it) but
+    // cannot say anything about what apply will read. Prefer --tfplan.
+    let artifact = flag(args, "--tfplan");
+    let plan_path_opt = flag(args, "--plan");
+    let (plan_src, tfplan_sha256) = match (artifact, plan_path_opt) {
+        (Some(tf), _) => match lex_iac::derive_plan_json(std::path::Path::new(tf)) {
+            Ok((json, digest)) => (json, Some(digest)),
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::from(2);
+            }
+        },
+        (None, Some(p)) => match read(p) {
+            Ok(src) => (src, None),
+            Err(c) => return c,
+        },
+        (None, None) => {
+            eprintln!("check needs --tfplan (preferred) or --plan\n\n{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+
+    let grant_src = match read(grant_path) {
+        Ok(g) => g,
+        Err(c) => return c,
     };
 
     let manifest = match Manifest::from_json(&grant_src) {
@@ -305,17 +335,106 @@ fn cmd_check(args: &[&str]) -> ExitCode {
         }
     }
 
+    // The commitment that survives a deletion (#21).
+    //
+    // Kept out of the log deliberately. A checkpoint stored beside the
+    // thing it commits to is removed in the same motion as the entry it
+    // would have testified about; its whole value is being somewhere the
+    // editor of the log does not reach. So it is a separate file the
+    // operator is expected to put somewhere else, and the flag is
+    // separate from --audit-out to make that a decision rather than a
+    // default.
+    if let Some(path) = flag(args, "--checkpoint-out") {
+        let Some(key) = &audit_key else {
+            eprintln!(
+                "--checkpoint-out needs --audit-key/--audit-key-file: an unsigned commitment \
+                 is one anybody can rewrite, which is the thing it exists to prevent"
+            );
+            return ExitCode::from(2);
+        };
+        // The crate reads no clock; the caller supplies the time it can
+        // defend. Seconds since the epoch is what an operator can check
+        // against everything else in an incident timeline.
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let cp = decision.audit.checkpoint(key, at);
+        match serde_json::to_string_pretty(&cp)
+            .map_err(|e| e.to_string())
+            .and_then(|j| std::fs::write(path, j).map_err(|e| e.to_string()))
+        {
+            Ok(()) => println!(
+                "checkpoint: {} entries at head sha256:{} -> {path}",
+                cp.len,
+                &cp.head[..16.min(cp.head.len())]
+            ),
+            Err(e) => {
+                eprintln!("could not write the checkpoint {path}: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+
     if as_json {
         print_json(&decision, &manifest, &infra);
     } else {
-        print_human(&decision, &manifest, &infra);
+        print_human(&decision, &manifest, &infra, &tfplan_sha256);
+    }
+
+    // Write down what was accepted, so a later apply has something to be
+    // held to. Only on an acceptance, and only when the artifact is
+    // known: an approval that cannot name the bytes it approved is the
+    // problem, not a weaker version of the solution.
+    if let Some(out) = flag(args, "--approval-out") {
+        match (&decision.verdict, &tfplan_sha256) {
+            (lex_iac::Verdict::Allow, Some(digest)) => {
+                let approval = lex_iac::Approval {
+                    verdict: "accepted".into(),
+                    tfplan_sha256: digest.clone(),
+                    plan_sha256: decision.plan.plan_sha256.clone(),
+                    manifest_sha256: lex_iac::manifest_digest(&grant_src),
+                    goal: manifest.goal.description.clone(),
+                };
+                match serde_json::to_string_pretty(&approval)
+                    .map_err(|e| e.to_string())
+                    .and_then(|j| std::fs::write(out, j).map_err(|e| e.to_string()))
+                {
+                    Ok(()) => println!("approval:  written to {out}"),
+                    Err(e) => {
+                        eprintln!("could not write the approval to {out}: {e}");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            (lex_iac::Verdict::Allow, None) => {
+                eprintln!(
+                    "refusing to write an approval: --plan was supplied, so nothing here \
+                     names the artifact an apply would run. Use --tfplan."
+                );
+                return ExitCode::from(2);
+            }
+            _ => {}
+        }
     }
     ExitCode::from(decision.exit_code() as u8)
 }
 
-fn print_human(decision: &lex_iac::Decision, manifest: &Manifest, infra: &lex_iac::InfraFacet) {
+fn print_human(
+    decision: &lex_iac::Decision,
+    manifest: &Manifest,
+    infra: &lex_iac::InfraFacet,
+    tfplan_sha256: &Option<String>,
+) {
     println!("goal:      {}", manifest.goal.description);
     println!("plan:      sha256:{}", decision.plan.plan_sha256);
+    match &tfplan_sha256 {
+        Some(d) => println!("artifact:  sha256:{d}  (the saved plan this JSON was read from)"),
+        None => println!(
+            "artifact:  unbound — the JSON was supplied, not derived; \
+             pass --tfplan so apply can prove it is holding the same bytes"
+        ),
+    }
     println!("grant:     {}", manifest.content_id());
     match decision.charged {
         Some(minor) => println!(
@@ -524,6 +643,61 @@ fn cmd_audit_pubkey(args: &[&str]) -> ExitCode {
     }
 }
 
+/// Hold a chain to a signed commitment about how long it once was.
+///
+/// Separate from the seals on purpose. A seal proves an entry is
+/// genuine; every entry left after a truncation is genuine, which is
+/// why `verify_seals` reports OK on a log somebody shortened. The only
+/// evidence that can contradict a deletion is a statement made while
+/// the entry still existed.
+fn checkpoint_verdict(
+    args: &[&str],
+    log: &Chain<PlanEvent>,
+    trusted: &[VerifyingKey],
+) -> Result<String, String> {
+    let Some(path) = flag(args, "--checkpoint") else {
+        return Ok(
+            "length: NOT CHECKED — pass --checkpoint <file> to detect deleted entries.".into(),
+        );
+    };
+    let src = std::fs::read_to_string(path)
+        .map_err(|e| format!("could not read the checkpoint {path}: {e}"))?;
+    let cp: lex_os_audit::Checkpoint = serde_json::from_str(&src)
+        .map_err(|e| format!("could not read the checkpoint {path}: {e}"))?;
+
+    // Verified against a key the caller trusts, never taken on its own
+    // word: whoever can truncate a log can also write the checkpoint
+    // that says the truncated length was right.
+    let mut verified = None;
+    for k in trusted {
+        if let Ok(v) = cp.verify(k) {
+            verified = Some(v);
+            break;
+        }
+    }
+    let Some(verified) = verified else {
+        return Err(format!(
+            "the checkpoint is not signed by any --trusted-key.\n  \
+             it claims length {} at head sha256:{}\n  \
+             signed by: {}",
+            cp.len, cp.head, cp.signer
+        ));
+    };
+
+    log.verify_against(&verified).map_err(|e| {
+        format!(
+            "{e}\n\n\
+             The chain on disk is intact and its seals hold — every entry left in it\n\
+             is genuine. That is what makes this the quiet attack: nothing was forged,\n\
+             something was removed, and only a commitment made beforehand can say so."
+        )
+    })?;
+    Ok(format!(
+        "length: OK — at least {} entries, matching the checkpoint's head.",
+        verified.as_checkpoint().len
+    ))
+}
+
 /// `audit verify` — the chain always, the seals when given a key.
 ///
 /// Reported separately, because they catch different things and a single
@@ -534,7 +708,12 @@ fn cmd_audit_pubkey(args: &[&str]) -> ExitCode {
 ///   not a holder who edits and then recomputes every hash;
 /// - the **seals** catch exactly that holder.
 ///
+/// - the **checkpoint** catches a truncation, which neither of the
+///   others can: every entry left after a deletion is genuine and the
+///   chain that remains is intact (#21).
+///
 /// Supplying no key checks no seals, and says so rather than passing.
+/// Supplying no checkpoint checks no length, and says that too.
 fn cmd_audit_verify(args: &[&str]) -> ExitCode {
     let Some(path) = flag(args, "--log") else {
         eprintln!("audit verify needs --log\n\n{USAGE}");
@@ -571,6 +750,10 @@ fn cmd_audit_verify(args: &[&str]) -> ExitCode {
             log.len()
         );
         println!("        Pass --trusted-key <hex> to hold them to it.");
+        println!(
+            "length: NOT CHECKED — without a checkpoint, entries deleted from the end\n\
+             \x20       are indistinguishable from entries never written."
+        );
         return ExitCode::from(0);
     }
 
@@ -595,7 +778,22 @@ fn cmd_audit_verify(args: &[&str]) -> ExitCode {
                 log.head()
             );
             println!("seals:  OK — every entry sealed by a trusted key.");
-            ExitCode::from(0)
+            // The truncation wall. An intact chain says nothing about
+            // entries that are no longer in it: drop the last one and
+            // what remains verifies clean, seals and all. Only a
+            // commitment made when the log was longer can notice, which
+            // is why this is a separate input and not something the log
+            // can assert about itself (#21).
+            match checkpoint_verdict(args, &log, &trusted) {
+                Ok(line) => {
+                    println!("{line}");
+                    ExitCode::from(0)
+                }
+                Err(e) => {
+                    println!("REFUSED — {e}");
+                    ExitCode::from(8)
+                }
+            }
         }
         Err(e) => {
             println!("REFUSED — the seals do not hold.");
@@ -684,6 +882,48 @@ fn cmd_apply(args: &[&str]) -> ExitCode {
             "note: no --box-kernel, so lex-os boots its own default — which is a path \
              relative to the lex-os checkout, not this one. Pass --box-kernel if \
              provisioning cannot find it."
+        );
+    }
+
+    // The binding, and the reason `apply` is more than `check` plus a
+    // boot. An earlier acceptance named a digest; this is where the file
+    // about to be applied is held to it.
+    //
+    // Note it compares against an approval written by a *previous* run.
+    // Re-deriving the digest here and comparing it to itself would be
+    // circular — the first attempt at this did exactly that and proved
+    // nothing, because the threat is not a swap within one process, it
+    // is a swap between the approval and the apply.
+    if let Some(app_path) = flag(args, "--approval") {
+        let Some(tf) = flag(args, "--tfplan") else {
+            eprintln!("--approval needs --tfplan: the approval names an artifact, so apply must be given one to hold to it");
+            return ExitCode::from(2);
+        };
+        let src = match read(app_path) {
+            Ok(s) => s,
+            Err(c) => return c,
+        };
+        let approval: lex_iac::Approval = match serde_json::from_str(&src) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("could not read the approval {app_path}: {e}");
+                return ExitCode::from(2);
+            }
+        };
+        let grant_for_check = match read(grant_path) {
+            Ok(g) => g,
+            Err(c) => return c,
+        };
+        if let Err(why) = approval.admits(std::path::Path::new(tf), &grant_for_check) {
+            println!();
+            println!("REFUSED — {why}");
+            println!();
+            println!("Nothing was applied. The box was never booted.");
+            return ExitCode::from(8);
+        }
+        println!(
+            "approval:  sha256:{} verified — this is the artifact that was accepted",
+            approval.tfplan_sha256
         );
     }
 
