@@ -208,3 +208,109 @@ fn this_gates_domain_is_its_own() {
     let _ = std::marker::PhantomData::<_Chain<PlanEvent>>;
     assert_eq!(PlanEvent::DOMAIN, b"lex.iac.audit.v1");
 }
+
+// ── Truncation (#21) ────────────────────────────────────────────────────
+//
+// The seal and the chain share a blind spot, and it is not a flaw in
+// either: a hash chain proves the entries it *contains* are unaltered,
+// and a seal proves each entry is genuine. Every entry left after a
+// deletion is genuine, and the chain that remains is intact — so a log
+// somebody shortened verifies perfectly by both.
+//
+// The refusal is the last entry written. An operator who would rather
+// the record did not show a refused production-database destroy does not
+// need to forge anything, or hold any key: they drop one entry off the
+// end. Only a statement made while that entry still existed can
+// contradict them.
+
+fn signing_key() -> SigningKey {
+    SigningKey::from_bytes(&[7u8; 32])
+}
+
+/// Drop the last entry the way an attacker would: by editing the file.
+/// Going through JSON rather than an in-memory constructor keeps the
+/// test on the path the log actually travels.
+fn truncate_tail(chain: &Chain<PlanEvent>) -> Chain<PlanEvent> {
+    let json = chain.to_json().expect("serialise");
+    let mut entries: Vec<serde_json::Value> =
+        serde_json::from_str(&json).expect("array of entries");
+    entries.pop().expect("a tail to remove");
+    Chain::from_json(&serde_json::to_string(&entries).unwrap()).expect("still well-formed JSON")
+}
+
+/// The property the checkpoint exists for.
+#[test]
+fn a_truncated_log_still_passes_the_chain_and_the_seals() {
+    let key = signing_key();
+    let d = check_sealed(
+        &fixture("rotate_deployment.json"),
+        &Manifest::from_json(&fixture("grant_ecs_only.json")).unwrap(),
+        None,
+        None,
+        &key,
+    )
+    .unwrap();
+    assert!(d.audit.len() >= 2, "need a tail to remove");
+
+    let short = truncate_tail(&d.audit);
+
+    // Both of the walls that already existed report clean. This is the
+    // finding, not a bug being introduced by the test.
+    short
+        .verify()
+        .expect("a truncated chain is still internally consistent");
+    short
+        .verify_seals(&[key.verifying_key()])
+        .expect("every surviving entry is genuinely sealed");
+}
+
+/// ...and the checkpoint is what notices.
+#[test]
+fn a_checkpoint_refuses_the_truncated_log() {
+    let key = signing_key();
+    let d = check_sealed(
+        &fixture("rotate_deployment.json"),
+        &Manifest::from_json(&fixture("grant_ecs_only.json")).unwrap(),
+        None,
+        None,
+        &key,
+    )
+    .unwrap();
+    let cp = d.audit.checkpoint(&key, 1_757_000_000);
+    let verified = cp.verify(&key.verifying_key()).expect("we just signed it");
+
+    d.audit
+        .verify_against(&verified)
+        .expect("the intact chain matches its own checkpoint");
+
+    let short = truncate_tail(&d.audit);
+    let err = short
+        .verify_against(&verified)
+        .expect_err("a shorter chain must not satisfy a longer commitment");
+    let msg = format!("{err}");
+    assert!(msg.contains("truncated"), "{msg}");
+}
+
+/// A commitment nobody trusts is not evidence. Whoever can shorten the
+/// log can also write a checkpoint agreeing with the shortened length,
+/// so the signature has to be checked against a key chosen in advance —
+/// which is why `verify_against` takes a `VerifiedCheckpoint` and there
+/// is no way to reach it with an unchecked one.
+#[test]
+fn a_checkpoint_signed_by_a_stranger_does_not_verify() {
+    let key = signing_key();
+    let attacker = SigningKey::from_bytes(&[9u8; 32]);
+    let d = check_sealed(
+        &fixture("rotate_deployment.json"),
+        &Manifest::from_json(&fixture("grant_ecs_only.json")).unwrap(),
+        None,
+        None,
+        &key,
+    )
+    .unwrap();
+    let forged = d.audit.checkpoint(&attacker, 1_757_000_000);
+    assert!(
+        forged.verify(&key.verifying_key()).is_err(),
+        "a checkpoint must not verify under a key that did not sign it"
+    );
+}
