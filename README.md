@@ -531,6 +531,18 @@ Applying is executing, and a grant that never said so has authorised a
 *decision*, not an action. That is a coherent thing to want, and it is
 why `check` and `apply` are separate verbs.
 
+**What this does not yet do is a real account.** Milestone 6 shipped with a
+credential-free provider deliberately: it proved the plumbing without
+deciding the hard part. A real apply needs provider credentials and state
+backend access, and neither can be waved through, because the wall bounds
+*where* the box can talk and not *what* it does there.
+[`docs/threat-model.md`](docs/threat-model.md) works out what the candidate
+designs actually defend against, and reaches two conclusions worth having
+before reading further: **no credential design defends against the
+operator**, and **state is upstream of the gate itself** — a plan derived
+from state the previous run could have forged is a document rather than a
+fact ([#17](https://github.com/alpibrusl/lex-iac/issues/17)).
+
 **A refusal never reaches the box.** The gate runs first; on a refusal
 `apply` returns the gate's exit code before the box is built, and says
 so:
