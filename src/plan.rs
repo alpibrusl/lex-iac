@@ -69,6 +69,20 @@ pub struct ResourceChange {
     pub change: Change,
 }
 
+impl ResourceChange {
+    /// The single verb this row proposes.
+    ///
+    /// `None` and `[]` both mean "this row does not say", which
+    /// [`Verb::from_actions`] answers as [`Verb::Unknown`] rather than
+    /// [`Verb::NoOp`] — a truncated row must not read as harmless. Kept
+    /// here rather than at each call site so the two walls that ask
+    /// (the effect rows and the state wall) cannot come to different
+    /// answers about the same row.
+    pub fn verb(&self) -> Verb {
+        Verb::from_actions(self.change.actions.as_deref().unwrap_or(&[]))
+    }
+}
+
 /// The proposed transition. Only `actions` matters for authority.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Change {

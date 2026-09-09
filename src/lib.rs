@@ -36,6 +36,7 @@ pub mod manifest;
 pub mod plan;
 pub mod pulumi;
 pub mod resource;
+pub mod state;
 pub mod trust;
 
 use serde::{Deserialize, Serialize};
@@ -198,9 +199,7 @@ pub fn compile(plan: &Plan, raw: &str) -> CompiledPlan {
         .resource_changes
         .iter()
         .map(|rc| {
-            // `None` and `[]` both mean "this row does not say", which
-            // `from_actions` answers as `Unknown` rather than `NoOp`.
-            let verb = Verb::from_actions(rc.change.actions.as_deref().unwrap_or(&[]));
+            let verb = rc.verb();
             let key = ResourceKey::from_terraform(&rc.r#type);
             EffectRow {
                 effect: Effect::new(&rc.r#type, verb, &rc.address),

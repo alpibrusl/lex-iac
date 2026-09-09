@@ -531,6 +531,32 @@ Applying is executing, and a grant that never said so has authorised a
 *decision*, not an action. That is a coherent thing to want, and it is
 why `check` and `apply` are separate verbs.
 
+**The state wall.** A plan is a function of configuration *and state*, so a
+box that can write state decides what every future plan says — and a gate
+reasoning about a plan derived from forged state is reasoning about a
+document rather than about reality. The box therefore gets prior state as a
+file and no backend credential, emits a *candidate* successor, and the host
+decides whether it may become the record:
+
+```sh
+lex-iac state commit --plan plan.json \
+                     --prior prior.tfstate --candidate candidate.tfstate
+```
+
+```
+REFUSED — 1 state change(s) the plan did not declare:
+  aws_iam_user.backdoor — state records `created` for `aws_iam_user.backdoor`,
+                          which the gated plan never mentions
+```
+
+The check is **structural, not semantic**: it sees which resources changed
+and how, never whether the values written were right — "known after apply"
+means a provider-computed id cannot be predicted from the plan. And it is
+**one-directional**: it refuses a change the plan did not declare, but does
+not require every declared change to have happened, because an apply that
+stopped halfway is a legitimate thing to record and refusing it would lose
+the evidence of what did happen.
+
 **What this does not yet do is a real account.** Milestone 6 shipped with a
 credential-free provider deliberately: it proved the plumbing without
 deciding the hard part. A real apply needs provider credentials and state
