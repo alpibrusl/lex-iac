@@ -194,7 +194,11 @@ fn a_document_that_is_not_a_state_is_could_not_run_not_refused() {
         "--prior",
         &write(&d, "prior.tfstate", &state("hello", "")),
         "--candidate",
-        &write(&d, "cand.tfstate", r#"{"version":4,"terraform_version":"1.9.0"}"#),
+        &write(
+            &d,
+            "cand.tfstate",
+            r#"{"version":4,"terraform_version":"1.9.0"}"#,
+        ),
     ]);
     assert_eq!(r.code, 2, "not-a-state is exit 2, not a refusal");
 }
