@@ -95,6 +95,73 @@ box exited 0
 boundary and not the simulator — the distinction `--simulated` exists to
 keep honest.
 
+## The state the box wrote, gated on the way back
+
+Run on the same host, 2026-09-09, on the state wall (#17).
+
+A fresh box, planned on the host, applied inside a real microVM:
+
+```
+[guest:exec] mediation outcome: Some("ran `proc.exec`") -> allowed=true
+decision: "allowed"
+perimeter: "firecracker"
+security_boundary: true
+stdout: "local_file.applied: Creating...
+         local_file.applied: Creation complete after 0s [id=b6ba18b0aa…]
+         Apply complete! Resources: 1 added, 0 changed, 0 destroyed."
+```
+
+The candidate state was then read out of the box's own filesystem — not
+constructed, not a fixture:
+
+```
+version 4  serial 1
+  managed local_file.applied  instances=1
+     id: b6ba18b0aa7693b3da9f7a52f9798b1564876840
+```
+
+and held against the plan the gate approved:
+
+```
+$ lex-iac state commit --plan plan.json \
+                       --prior prior.tfstate --candidate candidate.tfstate
+ALLOWED — 1 state change(s), each declared by the plan.
+  local_file.applied — created
+```
+
+Then the case the wall exists for. The same state, from the same real
+apply, with one resource appended — a box that did what it was told
+*and* something else:
+
+```
+$ lex-iac state commit --plan plan.json --prior prior.tfstate \
+                       --candidate tampered.tfstate \
+                       --commit-to backend.tfstate
+REFUSED — 1 state change(s) the plan did not declare:
+  aws_iam_user.backdoor — state records `created` for `aws_iam_user.backdoor`,
+                          which the gated plan never mentions
+
+The candidate was NOT committed.
+$ ls backend.tfstate
+  no — the record is untouched
+```
+
+The tampered file is valid JSON and a valid Terraform state; it parses,
+and every other resource in it is genuine. Only the comparison against
+the plan tells the two apart — which is the same shape as the artifact
+binding above, one layer further on: there, two valid plans; here, two
+valid states.
+
+That `ls` is the half worth keeping. A wall that prints a refusal and
+writes anyway is decoration, so the refusal path is the one with a test
+of its own.
+
+**What this half does not settle.** `apply` does not yet stage prior
+state into the guest or bring the candidate back out — that extraction
+was done by hand here, by mounting the image. The wall's verdict is
+unaffected, but the two halves are joined by the operator rather than by
+the tool, and the verdict does not yet join the audit chain.
+
 ## What this run does not settle
 
 Credentials. The box applied a `local_file`, which needs none. Whether
