@@ -37,6 +37,7 @@ usage:
   lex-iac apply --grant <manifest.json> --plan <plan.json> --box-rootfs <box.ext4>
                 [--box-kernel <vmlinux>] [--work-dir /work] [--tfplan tfplan]
                 [--jail-uid <n>] [--jail-gid <n>] [--lex-os <path>] [--dry-run]
+                [--credential-env <NAME>]
                 [every `check` flag too]
   lex-iac state commit --plan <plan.json> --prior <prior.tfstate>
                        --candidate <candidate.tfstate> [--commit-to <path>] [--json]
@@ -46,6 +47,18 @@ usage:
   lex-iac audit verify --log <log.json> [--trusted-key <hex>]...
                        [--checkpoint <cp.json>]
   lex-iac audit pubkey [--key <hex> | --key-file <path>]
+
+--credential-env names an environment variable whose value is handed to
+the box (option A of #17). The value is read from this environment, never
+from the command line, and never appears in argv — `ps` is readable by
+other users. It travels on the guest's stdin and lands in the manifest
+goal, so the audit chain records that goal's hash rather than its text.
+A credential is refused when the grant permits no egress: the allowlist
+is the only thing bounding where it can be spent.
+
+The box holds the token. Nothing bounds *which* calls it makes at an
+allowed endpoint — see docs/threat-model.md, which also lists what would
+make the host-side proxy worth building instead.
 
 `state commit` is the wall between an apply and the record every later
 plan is computed from. A box that can write state can forge that record,
@@ -1118,7 +1131,66 @@ fn cmd_apply(args: &[&str]) -> ExitCode {
     // so it passes no authorisation and the session correctly claims
     // none.
     let authorisation = box_audit_link(flag(args, "--audit-out"));
-    let argv = lex_iac::apply_argv(&spec, grant_path, box_audit, authorisation.as_deref());
+    // Option A of the credential design (#17): the box holds the token.
+    // Read from this environment, never from argv — `ps` is readable by
+    // other users on a shared host.
+    let credential = match flag(args, "--credential-env") {
+        None => None,
+        Some(name) => match lex_iac::apply::Credential::from_env(name, &manifest.egress) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::from(2);
+            }
+        },
+    };
+
+    // lex-os reads the guest's stdin from a *file*, so the value has to
+    // be somewhere for the length of the run. `/dev/shm` is tmpfs, so on
+    // a Linux host — the only kind that can boot a real box — it never
+    // reaches a disk. Elsewhere it falls back to the temp dir and says
+    // so, because a secret briefly on disk is a different promise.
+    let cred_file = match &credential {
+        None => None,
+        Some(c) => {
+            let dir = std::path::Path::new("/dev/shm");
+            let dir = if dir.is_dir() {
+                dir.to_path_buf()
+            } else {
+                eprintln!(
+                    "note: no /dev/shm on this host, so the credential is staged in \
+                     {} — on disk, not in memory, until this run ends",
+                    std::env::temp_dir().display()
+                );
+                std::env::temp_dir()
+            };
+            let path = dir.join(format!("lex-iac-cred-{}", std::process::id()));
+            if let Err(e) = write_secret(&path, &c.stdin_line()) {
+                eprintln!("could not stage the credential: {e}");
+                return ExitCode::from(2);
+            }
+            Some(path)
+        }
+    };
+
+    let argv = {
+        let mut a = lex_iac::apply::apply_argv_with_credential(
+            &spec,
+            grant_path,
+            box_audit,
+            authorisation.as_deref(),
+            credential.as_ref(),
+        );
+        if let Some(f) = &cred_file {
+            // Insert before the `--` that ends lex-os's own flags.
+            let at = a.iter().position(|x| x == "--").unwrap_or(a.len());
+            a.splice(
+                at..at,
+                ["--stdin-file".to_string(), f.display().to_string()],
+            );
+        }
+        a
+    };
 
     println!();
     println!("ALLOWED — applying inside the box.");
@@ -1134,10 +1206,15 @@ fn cmd_apply(args: &[&str]) -> ExitCode {
     //    reimplement it, and its exit code is passed through unchanged —
     //    a box that refused an effect must not read as an apply that
     //    succeeded.
-    match std::process::Command::new(&argv[0])
+    let status = std::process::Command::new(&argv[0])
         .args(&argv[1..])
-        .status()
-    {
+        .status();
+    // Before anything branches on the outcome: a refusal is not a reason
+    // to leave a token lying around.
+    if let Some(f) = &cred_file {
+        let _ = std::fs::remove_file(f);
+    }
+    match status {
         Ok(st) => {
             let code = st.code().unwrap_or(2);
             println!();
@@ -1158,6 +1235,28 @@ fn cmd_apply(args: &[&str]) -> ExitCode {
 /// function of configuration *and state*, so a box that can write state
 /// decides what every future plan says. The verdict is checkable because
 /// the gate already read the plan as `(address, verb)` pairs.
+/// Write a secret to `path`, readable only by this user.
+///
+/// The mode is set at creation rather than after, so there is no window
+/// in which the file exists and is world-readable.
+#[cfg(unix)]
+fn write_secret(path: &std::path::Path, body: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    f.write_all(body.as_bytes())
+}
+
+#[cfg(not(unix))]
+fn write_secret(path: &std::path::Path, body: &str) -> std::io::Result<()> {
+    std::fs::write(path, body)
+}
+
 fn cmd_state_commit(args: &[&str]) -> ExitCode {
     let (Some(plan_path), Some(prior_path), Some(candidate_path)) = (
         flag(args, "--plan"),
