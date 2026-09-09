@@ -81,6 +81,15 @@ pub struct EffectRow {
     pub address: String,
     /// The raw Terraform type, before the provider/service split.
     pub resource_type: String,
+    /// The provider's Terraform source address, as the plan reports it
+    /// — `registry.terraform.io/hetznercloud/hcloud`.
+    ///
+    /// Carried because a provider is code the run *executes* with the
+    /// credentials, so which one it is is a provenance fact the mandate
+    /// may want to bound. Empty when the plan does not say, which is
+    /// treated as unreadable rather than as any particular provider.
+    #[serde(default)]
+    pub provider: String,
     /// True when this build has no opinion about `resource_type`.
     ///
     /// Its destruction was already classified consequential; this flag
@@ -206,6 +215,7 @@ pub fn compile(plan: &Plan, raw: &str) -> CompiledPlan {
                 reversibility: classify(&key, verb, &rc.mode),
                 address: rc.address.clone(),
                 resource_type: rc.r#type.clone(),
+                provider: rc.provider_name.clone(),
                 unknown_type: !classify::is_known(&key),
             }
         })

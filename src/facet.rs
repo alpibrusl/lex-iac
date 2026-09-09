@@ -70,6 +70,51 @@ pub struct InfraFacet {
     /// ¥5000 is not $50 — so it has to narrow with everything else.
     #[serde(default = "default_currency")]
     pub currency: String,
+    /// Which providers a plan may draw on, by Terraform source address.
+    ///
+    /// A provider is not a library the run links against: it is a binary
+    /// Terraform downloads and **executes**, and hands the credentials
+    /// to. So "which providers" is a provenance question about code that
+    /// runs, not an authority question about what the run may do — and
+    /// it is answered differently from [`InfraFacet::allow`].
+    ///
+    /// **An empty list is not "no providers".** It means the manifest
+    /// declares no provider policy, and a plan admitted under that
+    /// silence says so in its warnings rather than passing quietly. The
+    /// alternative reading would refuse every plan ever written, which
+    /// is why `allow`'s rule — empty grants nothing — is the wrong one
+    /// here. lex-k8s reached the same place with `imagePrefixes`, for
+    /// the same reason: both are about where the code came from.
+    ///
+    /// Two segments name a provider on the public registry, so
+    /// `hetznercloud/hcloud` means
+    /// `registry.terraform.io/hetznercloud/hcloud` and nothing else. A
+    /// private registry is written in full. The host is **not** dropped
+    /// before comparing: `tf.internal.example/team/aws` and
+    /// `registry.terraform.io/team/aws` are different code by different
+    /// people, and a provenance check that conflated them would be
+    /// worse than none.
+    ///
+    /// No wildcards. `hashicorp/*` would mean "anything anyone publishes
+    /// under that namespace, now and later", which is not a decision a
+    /// mandate can make on behalf of a future publisher.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<String>,
+}
+
+/// The registry Terraform uses when a source names none.
+const DEFAULT_REGISTRY: &str = "registry.terraform.io";
+
+/// Expand a manifest entry to the full source address Terraform reports.
+///
+/// `hetznercloud/hcloud` -> `registry.terraform.io/hetznercloud/hcloud`;
+/// anything already carrying a host is left alone.
+pub fn canonical_provider(entry: &str) -> String {
+    if entry.split('/').count() == 2 {
+        format!("{DEFAULT_REGISTRY}/{entry}")
+    } else {
+        entry.to_string()
+    }
 }
 
 fn default_currency() -> String {
@@ -82,6 +127,7 @@ impl Default for InfraFacet {
             allow: Vec::new(),
             scope: Scope::default(),
             currency: default_currency(),
+            providers: Vec::new(),
         }
     }
 }
@@ -305,6 +351,34 @@ impl Facet for InfraFacet {
                     Self::NAME,
                     format!("allow: child claims `{entry}`, which the parent does not grant"),
                 ));
+            }
+        }
+
+        // Providers narrow, and the asymmetry is the point. A parent
+        // that declared no provider policy has not granted "any
+        // provider" — it has declined to decide, so a child may decide,
+        // which is a tightening. A child that empties a list its parent
+        // set has removed a constraint, which is a widening and is
+        // refused. Going from unchecked to checked is always allowed;
+        // going back never is.
+        if !parent.providers.is_empty() {
+            if child.providers.is_empty() {
+                return Err(FacetError::new(
+                    Self::NAME,
+                    "providers: parent names an allowed set, child names none —                      dropping the list widens it, since an empty list is                      `no policy` rather than `nothing allowed`"
+                        .to_string(),
+                ));
+            }
+            for entry in &child.providers {
+                let c = canonical_provider(entry);
+                if !parent.providers.iter().any(|p| canonical_provider(p) == c) {
+                    return Err(FacetError::new(
+                        Self::NAME,
+                        format!(
+                            "providers: child claims `{entry}`, which the parent does not grant"
+                        ),
+                    ));
+                }
             }
         }
 
