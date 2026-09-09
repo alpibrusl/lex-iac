@@ -10,8 +10,10 @@ names three shapes it could take.
 Those three shapes are not comparable until someone says what they defend
 against. This document says it, so the choice stops being taste.
 
-It is a design document. Nothing below is implemented except where it says
-so.
+A design document, except where it says otherwise. **The state axis is
+built** — see `lex-iac state commit` and `src/state.rs`. The credential
+axis is not, and is still waiting on the one question below that decides
+it.
 
 ## What the perimeter already gives
 
@@ -170,22 +172,53 @@ letting the host push whatever comes back unchecked leaves the box in control
 of the record by a longer route. The validation is the mechanism; read-only
 access is just what makes the validation the only path.
 
-### Implementation sketch
+### What was built
 
-1. `apply` takes `--state <path>` and stages it into the guest working
-   directory. No backend block, no backend credentials in the box.
-2. After the run, the candidate `terraform.tfstate` comes back out as an
-   artifact alongside the audit chain.
-3. A new `state-commit` step diffs prior against candidate, compares the
-   changed-address set to the approval's plan, and refuses on mismatch.
-4. Only on success does the host write to the real backend.
-5. The verdict joins the chain, so "state was committed" is an audited
-   decision rather than a side effect.
+```sh
+lex-iac state commit --plan plan.json \
+                     --prior prior.tfstate --candidate candidate.tfstate \
+                     [--commit-to path]
+```
 
-The decisive test is the one that mirrors `a_different_but_equally_valid_plan_is_refused`:
+```
+REFUSED — 1 state change(s) the plan did not declare:
+  aws_iam_user.backdoor — state records `created` for `aws_iam_user.backdoor`,
+                          which the gated plan never mentions
+
+The candidate was NOT committed. A state the plan does not account for is
+the input to every plan after it.
+```
+
+Exit 0 allows, 8 refuses, 2 could not run — and that third code is
+load-bearing. A malformed candidate is *"I could not tell"*, never *"I
+refused"*: an operator who mistypes a path must not be told the box
+attacked them, and a rule keyed on exit 8 must not fire on a typo.
+
+`--commit-to` writes the candidate on success and never on a refusal.
+Without it the verdict is the output and the caller acts on the exit
+code, which is what a remote backend needs — there is no backend
+integration here to get wrong.
+
+The decisive test mirrors `a_different_but_equally_valid_plan_is_refused`:
 **a candidate state that is internally consistent and well-formed, and
-changes one address the plan never mentioned, is refused.** It has to fail
-for the structural reason, not because it was malformed.
+changes one address the plan never mentioned, is refused.** It fails for
+the structural reason, which is only meaningful because malformed input
+lands on exit 2 instead — otherwise it could be passing for the wrong
+reason, and a separate test pins that.
+
+**Deliberately one-directional.** It refuses a change the plan did not
+declare; it does not require every declared change to have happened. An
+apply that stops halfway leaves changes undone, and that state is a
+legitimate thing to record — refusing it would destroy the evidence of
+what actually happened, which is what an operator needs most at exactly
+that moment.
+
+### Still to build
+
+`apply` does not yet stage prior state into the guest or bring the
+candidate back out, so today the two halves are joined by the operator
+rather than by the tool, and the verdict does not join the audit chain.
+Neither changes what the wall decides.
 
 ## What this document does not defend against
 

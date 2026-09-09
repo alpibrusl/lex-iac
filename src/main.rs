@@ -38,12 +38,33 @@ usage:
                 [--box-kernel <vmlinux>] [--work-dir /work] [--tfplan tfplan]
                 [--jail-uid <n>] [--jail-gid <n>] [--lex-os <path>] [--dry-run]
                 [every `check` flag too]
+  lex-iac state commit --plan <plan.json> --prior <prior.tfstate>
+                       --candidate <candidate.tfstate> [--commit-to <path>] [--json]
   lex-iac manifest narrow --parent <manifest.json> --child <manifest.json>
   lex-iac audit reconcile --ledger <ledger.json> --decisions <dir>
                        [--trusted-key <hex>]...
   lex-iac audit verify --log <log.json> [--trusted-key <hex>]...
                        [--checkpoint <cp.json>]
   lex-iac audit pubkey [--key <hex> | --key-file <path>]
+
+`state commit` is the wall between an apply and the record every later
+plan is computed from. A box that can write state can forge that record,
+and a gate reasoning about a plan derived from forged state is reasoning
+about a document rather than about reality. So the box gets prior state
+as a file and no backend credential; it emits a candidate, and this
+decides whether the candidate may become the record: every resource that
+differs between prior and candidate must be one the gated plan named,
+with a verb that agrees.
+
+It refuses a change the plan did not declare. It does not require every
+declared change to have happened — an apply that stopped halfway is a
+legitimate thing to record, and refusing it would lose the evidence of
+what did happen. The check is structural: it sees which resources
+changed and how, never whether the values written were the right ones.
+
+--commit-to writes the candidate there on success. Without it the verdict
+is the output and the caller acts on the exit code, which is what a
+remote backend needs.
 
 --cost takes an estimator's JSON (Infracost today). Without it the spend
 is unknown, and an unknown price is not a price of zero: creating or
@@ -96,6 +117,7 @@ fn main() -> ExitCode {
         ["check", rest @ ..] => cmd_check(rest),
         ["manifest", "narrow", rest @ ..] => cmd_narrow(rest),
         ["apply", rest @ ..] => cmd_apply(rest),
+        ["state", "commit", rest @ ..] => cmd_state_commit(rest),
         ["audit", "reconcile", rest @ ..] => cmd_audit_reconcile(rest),
         ["audit", "verify", rest @ ..] => cmd_audit_verify(rest),
         ["audit", "pubkey", rest @ ..] => cmd_audit_pubkey(rest),
@@ -1126,6 +1148,135 @@ fn cmd_apply(args: &[&str]) -> ExitCode {
             eprintln!("apply: could not run `{}`: {e}", spec.lex_os);
             eprintln!("       Is lex-os on PATH? Override with --lex-os <path>.");
             ExitCode::from(2)
+        }
+    }
+}
+
+/// `lex-iac state commit` — may this candidate state become the record?
+///
+/// The wall that sits upstream of every other one here: a plan is a
+/// function of configuration *and state*, so a box that can write state
+/// decides what every future plan says. The verdict is checkable because
+/// the gate already read the plan as `(address, verb)` pairs.
+fn cmd_state_commit(args: &[&str]) -> ExitCode {
+    let (Some(plan_path), Some(prior_path), Some(candidate_path)) = (
+        flag(args, "--plan"),
+        flag(args, "--prior"),
+        flag(args, "--candidate"),
+    ) else {
+        eprintln!("state commit needs --plan, --prior and --candidate\n\n{USAGE}");
+        return ExitCode::from(2);
+    };
+    let json_out = args.contains(&"--json");
+
+    // Reading failures are exit 2, never 8: "I could not tell" must not
+    // be recorded as "I refused", or an operator debugging a typo would
+    // read it as an attack.
+    let read = |what: &str, path: &str| -> Result<String, ExitCode> {
+        std::fs::read_to_string(path).map_err(|e| {
+            eprintln!("cannot read {what} `{path}`: {e}");
+            ExitCode::from(2)
+        })
+    };
+
+    let plan_src = match read("plan", plan_path) {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    let prior_src = match read("prior state", prior_path) {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    let candidate_src = match read("candidate state", candidate_path) {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+
+    let plan = match lex_iac::plan::Plan::from_json(&plan_src) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    let prior = match lex_iac::state::State::from_json(&prior_src) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("prior state: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let candidate = match lex_iac::state::State::from_json(&candidate_src) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("candidate state: {e}");
+            return ExitCode::from(2);
+        }
+    };
+
+    let changes = lex_iac::state::diff(&prior, &candidate);
+    match lex_iac::state::admits(&plan, &prior, &candidate) {
+        Err(refusals) => {
+            if json_out {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "verdict": "refused",
+                        "changed": changes.len(),
+                        "refusals": refusals,
+                    })
+                );
+            } else {
+                println!(
+                    "REFUSED — {} state change(s) the plan did not declare:",
+                    refusals.len()
+                );
+                for r in &refusals {
+                    println!("  {} — {}", r.address, r.reason);
+                }
+                println!(
+                    "\nThe candidate was NOT committed. A state the plan does not account \
+                     for is the input to every plan after it."
+                );
+            }
+            ExitCode::from(8)
+        }
+        Ok(()) => {
+            // Commit only after the verdict, and only when asked. For a
+            // remote backend the caller owns the write and reads the
+            // exit code; there is no backend integration to get wrong.
+            if let Some(dest) = flag(args, "--commit-to") {
+                if let Err(e) = std::fs::write(dest, &candidate_src) {
+                    eprintln!("verdict was allow, but writing `{dest}` failed: {e}");
+                    return ExitCode::from(2);
+                }
+            }
+            if json_out {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "verdict": "allowed",
+                        "changed": changes.len(),
+                        "committed_to": flag(args, "--commit-to"),
+                    })
+                );
+            } else {
+                println!(
+                    "ALLOWED — {} state change(s), each declared by the plan.",
+                    changes.len()
+                );
+                for (addr, c) in &changes {
+                    println!("  {addr} — {}", c.as_str());
+                }
+                match flag(args, "--commit-to") {
+                    Some(dest) => println!("\nCommitted to {dest}."),
+                    None => println!(
+                        "\nNot committed: no --commit-to. The verdict is the output; \
+                         write the candidate where your backend keeps it."
+                    ),
+                }
+            }
+            ExitCode::from(0)
         }
     }
 }
