@@ -213,12 +213,32 @@ legitimate thing to record — refusing it would destroy the evidence of
 what actually happened, which is what an operator needs most at exactly
 that moment.
 
-### Still to build
+### The round trip
 
-`apply` does not yet stage prior state into the guest or bring the
-candidate back out, so today the two halves are joined by the operator
-rather than by the tool, and the verdict does not join the audit chain.
-Neither changes what the wall decides.
+`apply --state prior.tfstate --state-out candidate.tfstate` now does the
+whole thing: stages prior state into the image before the box boots,
+takes the candidate out after it halts, judges it, and writes
+`--state-out` only if it is admitted.
+
+The box gets no host mount while it runs — that is the boundary — so the
+only moments a host can touch the guest filesystem are before and after,
+on the image file. `debugfs` from e2fsprogs does that without root, a
+loop device, or putting the guest's filesystem into the host kernel.
+
+**`debugfs` does not go through the ext4 journal, and that matters in
+both directions.** A box that halted left its last writes *in* the
+journal, so a raw read returns the filesystem as it was before the box
+ran — the first working version reported "0 state changes" for an apply
+that had just created a resource, which reads as a bug in the comparison
+rather than a stale view. Writing has the mirror problem: `debugfs -w`
+edits behind the journal's back, and the guest can revert it on mount.
+Both sides therefore run `e2fsck -fp` first, which replays the journal.
+One consequence worth knowing: reading an image modifies it, because
+replaying a journal is a write.
+
+Only the plan's own artifact is used for the judgement — `apply`
+re-derives it rather than accepting a second document, so the state wall
+is held to exactly what the gate approved.
 
 ## Option A, as built — and what it is not
 

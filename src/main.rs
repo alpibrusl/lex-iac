@@ -38,6 +38,7 @@ usage:
                 [--box-kernel <vmlinux>] [--work-dir /work] [--tfplan tfplan]
                 [--jail-uid <n>] [--jail-gid <n>] [--lex-os <path>] [--dry-run]
                 [--credential-env <NAME>]
+                [--state <prior.tfstate>] [--state-out <candidate.tfstate>]
                 [every `check` flag too]
   lex-iac state commit --plan <plan.json> --prior <prior.tfstate>
                        --candidate <candidate.tfstate> [--commit-to <path>] [--json]
@@ -47,6 +48,15 @@ usage:
   lex-iac audit verify --log <log.json> [--trusted-key <hex>]...
                        [--checkpoint <cp.json>]
   lex-iac audit pubkey [--key <hex> | --key-file <path>]
+
+--state stages a prior state file into the box before it boots, and
+--state-out takes the candidate back out after it halts and decides
+whether it may become the record: every resource that differs must be one
+the gated plan named, with a verb that agrees. On a refusal nothing is
+written, because a state the plan does not account for is the input to
+every plan after it. Both use `debugfs` (e2fsprogs) to touch the image
+without mounting it — no root, no loop device, and nothing of the guest's
+filesystem in the host kernel.
 
 --credential-env names an environment variable whose value is handed to
 the box (option A of #17). The value is read from this environment, never
@@ -1192,6 +1202,54 @@ fn cmd_apply(args: &[&str]) -> ExitCode {
         a
     };
 
+    // The plan `check` just accepted, re-derived so the state wall can
+    // be held to the same document rather than to a second reading of
+    // it. Only needed when a candidate is coming back.
+    let plan_src = if flag(args, "--state-out").is_some() {
+        match (flag(args, "--tfplan"), flag(args, "--plan")) {
+            (Some(tf), _) => match lex_iac::derive_plan_json(std::path::Path::new(tf)) {
+                Ok((json, _)) => Some(json),
+                Err(e) => {
+                    eprintln!("{e}");
+                    return ExitCode::from(2);
+                }
+            },
+            (None, Some(p)) => match read(p) {
+                Ok(src) => Some(src),
+                Err(c) => return c,
+            },
+            (None, None) => {
+                eprintln!("--state-out needs the plan too: pass --tfplan or --plan");
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        None
+    };
+
+    // The state half of #17. Prior state goes into the image before the
+    // box boots, because lex-os gives the box no host mount while it
+    // runs — that is the boundary, and this works with it rather than
+    // around it.
+    let guest_state = format!("{}/terraform.tfstate", spec.work_dir);
+    let prior_src = match flag(args, "--state") {
+        None => None,
+        Some(path) => match read(path) {
+            Ok(src) => Some(src),
+            Err(c) => return c,
+        },
+    };
+    if let Some(src) = &prior_src {
+        if let Err(e) = lex_iac::guestfs::write_file(&spec.rootfs, &guest_state, src) {
+            eprintln!("could not stage prior state into the box: {e}");
+            return ExitCode::from(2);
+        }
+        println!(
+            "  staged prior state at {guest_state} ({} bytes)",
+            src.len()
+        );
+    }
+
     println!();
     println!("ALLOWED — applying inside the box.");
     println!("  {}", argv.join(" "));
@@ -1219,12 +1277,111 @@ fn cmd_apply(args: &[&str]) -> ExitCode {
             let code = st.code().unwrap_or(2);
             println!();
             println!("box exited {code}");
-            ExitCode::from(code as u8)
+
+            // The record half. Only when the caller asked for the
+            // candidate: without --state-out there is nothing to commit
+            // and nothing to judge.
+            let Some(dest) = flag(args, "--state-out") else {
+                return ExitCode::from(code as u8);
+            };
+            // A box that failed did not produce a state worth judging,
+            // and reading one would invite committing a half-apply that
+            // nobody looked at.
+            if code != 0 {
+                eprintln!(
+                    "note: the box exited {code}, so no state was extracted. \
+                     Nothing was written to {dest}."
+                );
+                return ExitCode::from(code as u8);
+            }
+            let plan_src = plan_src.expect("--state-out resolved a plan above");
+            match commit_state(&spec, &guest_state, prior_src.as_deref(), &plan_src, dest) {
+                Ok(c) => ExitCode::from(c),
+                Err(c) => ExitCode::from(c),
+            }
         }
         Err(e) => {
             eprintln!("apply: could not run `{}`: {e}", spec.lex_os);
             eprintln!("       Is lex-os on PATH? Override with --lex-os <path>.");
             ExitCode::from(2)
+        }
+    }
+}
+
+/// Take the candidate state out of the box and decide whether it may
+/// become the record.
+///
+/// Separate from `cmd_apply` because it is a decision, not plumbing: the
+/// same comparison `lex-iac state commit` makes, run without the
+/// operator having to mount an image by hand.
+fn commit_state(
+    spec: &lex_iac::BoxSpec,
+    guest_state: &str,
+    prior_src: Option<&str>,
+    plan_src: &str,
+    dest: &str,
+) -> Result<u8, u8> {
+    let candidate_src = match lex_iac::guestfs::read_file(&spec.rootfs, guest_state) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("could not read the candidate state out of the box: {e}");
+            return Err(2);
+        }
+    };
+
+    // No prior state means the box started from nothing, which is a real
+    // first apply rather than a missing input — the honest prior is an
+    // empty state, and terraform would have started from one too.
+    const EMPTY: &str = r#"{"version":4,"resources":[]}"#;
+    let parse = |what: &str, src: &str| match lex_iac::state::State::from_json(src) {
+        Ok(s) => Ok(s),
+        Err(e) => {
+            eprintln!("{what} state: {e}");
+            Err(2u8)
+        }
+    };
+    let prior = parse("prior", prior_src.unwrap_or(EMPTY))?;
+    let candidate = parse("candidate", &candidate_src)?;
+    let plan = match lex_iac::plan::Plan::from_json(plan_src) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            return Err(2);
+        }
+    };
+
+    let changes = lex_iac::state::diff(&prior, &candidate);
+    println!();
+    match lex_iac::state::admits(&plan, &prior, &candidate) {
+        Err(refusals) => {
+            println!(
+                "REFUSED — {} state change(s) the plan did not declare:",
+                refusals.len()
+            );
+            for r in &refusals {
+                println!("  {} — {}", r.address, r.reason);
+            }
+            println!(
+                "\nThe box applied, but its record was not committed. Nothing was \
+                 written to {dest}: a state the plan does not account for is the \
+                 input to every plan after it."
+            );
+            Err(8)
+        }
+        Ok(()) => {
+            if let Err(e) = std::fs::write(dest, &candidate_src) {
+                eprintln!("the state was admitted, but writing `{dest}` failed: {e}");
+                return Err(2);
+            }
+            println!(
+                "COMMITTED — {} state change(s), each declared by the plan.",
+                changes.len()
+            );
+            for (addr, c) in &changes {
+                println!("  {addr} — {}", c.as_str());
+            }
+            println!("\nWritten to {dest}.");
+            Ok(0)
         }
     }
 }
