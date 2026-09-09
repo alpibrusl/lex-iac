@@ -99,6 +99,28 @@ pub enum PlanEvent {
         /// the contract's optional human-facing field.
         subject: String,
     },
+    /// The state the box wrote back, judged against the plan that was
+    /// approved.
+    ///
+    /// Recorded whether it was committed or refused, so the chain says
+    /// what happened to the record rather than only what happened to the
+    /// plan. Without it, "the state was committed" is a side effect: the
+    /// audit answers *was this plan allowed* and stays silent about
+    /// whether what came back matched it.
+    StateJudged {
+        artifact_sha256: String,
+        /// `committed` or `refused`.
+        outcome: String,
+        /// Content address of the candidate, so a later reader can tell
+        /// which bytes were judged without the file being kept.
+        candidate_sha256: String,
+        /// How many resources differed between prior and candidate.
+        changed: usize,
+        /// Empty when it was committed; one line per unplanned change
+        /// otherwise.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unplanned: Vec<String>,
+    },
     /// Refused, naming the single effect that tripped the wall — the
     /// operator needs one line to look at, not a verdict on the plan.
     ///
