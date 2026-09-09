@@ -171,6 +171,13 @@ pub enum Wall {
     Trust,
     /// The gate could not read the effect well enough to check it.
     Unreadable,
+    /// The plan draws on a provider the mandate does not name.
+    ///
+    /// Separate from `Narrowing` because it answers a different
+    /// question and sends an operator somewhere else: not *may this run
+    /// do that*, but *whose code is this run executing*. A provider is
+    /// a binary Terraform downloads and runs with the credentials.
+    Provenance,
 }
 
 impl Wall {
@@ -181,6 +188,7 @@ impl Wall {
             Wall::Budget => "budget",
             Wall::Trust => "trust",
             Wall::Unreadable => "unreadable",
+            Wall::Provenance => "provenance",
         }
     }
 }
@@ -353,6 +361,43 @@ fn check_inner(
         .filter(|row| row.effect.verb.mutates())
         .filter_map(|row| refuse(row, &infra, cost.is_some(), untrusted))
         .collect();
+
+    // The provenance leg. Only when the mandate names a set: an empty
+    // list means no provider policy was declared, not that nothing is
+    // allowed — refusing every plan is not what silence should buy.
+    if !infra.providers.is_empty() {
+        let allowed: Vec<String> = infra
+            .providers
+            .iter()
+            .map(|p| crate::facet::canonical_provider(p))
+            .collect();
+        for row in plan.rows.iter().filter(|r| r.effect.verb.mutates()) {
+            if row.provider.is_empty() {
+                refusals.push(Refusal {
+                    wall: Wall::Unreadable,
+                    effect: row.effect.to_string(),
+                    address: row.address.clone(),
+                    reason: "this plan does not say which provider owns the row, so the \
+                             mandate's provider list cannot be applied to it — admitting \
+                             it would make that list decorative"
+                        .to_string(),
+                    grant_allows: allowed.clone(),
+                });
+            } else if !allowed.contains(&row.provider) {
+                refusals.push(Refusal {
+                    wall: Wall::Provenance,
+                    effect: row.effect.to_string(),
+                    address: row.address.clone(),
+                    reason: format!(
+                        "`{}` is not a provider this mandate names; a provider is code \
+                         the run executes with the credentials",
+                        row.provider
+                    ),
+                    grant_allows: allowed.clone(),
+                });
+            }
+        }
+    }
 
     // The budget leg: after reversibility, before allow. Recorded
     // whether or not it fits — a budget you only see when it was

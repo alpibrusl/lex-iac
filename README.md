@@ -531,6 +531,49 @@ Applying is executing, and a grant that never said so has authorised a
 *decision*, not an action. That is a coherent thing to want, and it is
 why `check` and `apply` are separate verbs.
 
+### Which providers a plan may draw on
+
+A provider is not a library the run links against: it is a binary Terraform
+downloads and **executes**, and hands the credentials to. So *whose code is
+this* is a question the mandate can answer:
+
+```json
+"facets": { "infra": {
+  "allow": ["hcloud.server.*"],
+  "providers": ["hetznercloud/hcloud"]
+}}
+```
+
+```
+REFUSED — 1 effect(s) outside the grant:
+  hcloud.server.create  [provenance]
+    at:     hcloud_server.web
+    reason: `registry.terraform.io/evilcorp/hcloud` is not a provider this
+            mandate names; a provider is code the run executes with the
+            credentials
+```
+
+Three rules, each chosen against an alternative that looks reasonable:
+
+- **An empty list is no policy, not "no providers".** Reading it the other
+  way — as `allow` is read — would refuse every plan ever written. It is
+  the same answer lex-k8s reached for `imagePrefixes`, because both are
+  about where code came from rather than what authority was granted. An
+  admitted plan says so rather than passing quietly.
+- **The registry host is part of the identity.** `hetznercloud/hcloud` means
+  the public registry and nothing else; a private registry is written in
+  full. Conflating `tf.internal.example/team/aws` with
+  `registry.terraform.io/team/aws` would be worse than not checking.
+- **A row whose provider the gate cannot read is refused, not admitted** —
+  otherwise the policy would be decorative for exactly the plans that omit
+  the field. Pulumi plans name a type but never a provider source, so they
+  cannot carry a provider policy yet, and they are told that.
+
+Narrowing is asymmetric, and deliberately so: a child may *add* a policy its
+parent left open, because a parent that declined to decide has not granted
+"any provider". A child may not **empty** a list its parent set — that
+removes a constraint, however much it looks like subtraction.
+
 **The state wall.** A plan is a function of configuration *and state*, so a
 box that can write state decides what every future plan says — and a gate
 reasoning about a plan derived from forged state is reasoning about a

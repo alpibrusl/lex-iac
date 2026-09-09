@@ -226,6 +226,13 @@ pub fn compile(preview: &Preview, raw: &str) -> CompiledPlan {
                 reversibility: classify::classify(&key, *verb, "managed"),
                 address,
                 resource_type: pulumi_type.clone(),
+                // Pulumi names a type (`aws:s3/bucket:Bucket`), never a
+                // provider *source address*, so there is nothing here to
+                // report. Left empty rather than guessed at: the gate
+                // refuses a provider policy it cannot evaluate instead
+                // of admitting the row, which is what would make the
+                // policy decorative for Pulumi callers.
+                provider: String::new(),
                 unknown_type: !classify::is_known(&key),
             }
         })
