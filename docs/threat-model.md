@@ -11,9 +11,9 @@ Those three shapes are not comparable until someone says what they defend
 against. This document says it, so the choice stops being taste.
 
 A design document, except where it says otherwise. **The state axis is
-built** — see `lex-iac state commit` and `src/state.rs`. The credential
-axis is not, and is still waiting on the one question below that decides
-it.
+built** (`lex-iac state commit`, `src/state.rs`), and so is **option A**
+of the credential axis (`apply --credential-env`). Option B is not, and
+the section at the bottom says what would make it worth building.
 
 ## What the perimeter already gives
 
@@ -219,6 +219,76 @@ that moment.
 candidate back out, so today the two halves are joined by the operator
 rather than by the tool, and the verdict does not join the audit chain.
 Neither changes what the wall decides.
+
+## Option A, as built — and what it is not
+
+```sh
+export HCLOUD_TOKEN=…
+lex-iac apply --grant grant.json --tfplan tfplan --credential-env HCLOUD_TOKEN …
+```
+
+The value is read from the environment and **never** enters `argv`: on a
+shared host `ps` is readable by other users, and a token on a command
+line is a token in everyone's process list. It reaches the guest over
+lex-os's stdin channel — a pipe to the subprocess — and lands in the
+manifest goal, so what the audit chain records is that goal's **hash**,
+not its text. `Credential`'s `Debug` prints `<redacted>`, because a
+`{:?}` added to a log line months from now should not be what leaks it.
+
+A credential with an empty `egress` is refused. The wall bounds *reach*,
+so the allowlist is the only thing that says where the credential may be
+spent; a credential with nowhere to go is a secret in a box for no
+reason.
+
+**What it is not.** The box holds the token. Nothing here constrains
+which calls it makes at an allowed endpoint — that is exactly the line
+this document drew, and option A does not move it.
+
+### Hetzner makes A weaker than this document assumed
+
+Written when the examples were AWS. Option A above says "an STS session
+scoped as tightly as the plan needs, expiring in minutes", and that
+premise does not hold for the provider actually in use.
+
+Hetzner Cloud has **no STS equivalent**: an API token is project-wide,
+read-only or read-write, and does not expire. So "scoped and short-lived"
+degrades to "project-wide and long-lived, rotated by hand". The
+mitigations that remain are real but smaller — a read-only token where
+the plan only reads, a separate project per environment, and rotation
+after any run that could have leaked.
+
+This does not change the recommendation, because the recommendation
+turned on *what runs in the box*, not on how good the credential is. It
+does change how much A buys, and that is worth knowing before relying
+on it.
+
+## When to revisit option B
+
+B — credentials on the host behind a proxy enforcing method and path, so
+the box never holds them — costs real work and does not generalise
+cleanly between providers. It was not built because the deciding
+question came back the right way: nothing third-party runs in the box.
+
+Build it when any of these becomes true. Each is a change in *how you
+operate*, not in this code:
+
+1. **A module or provider enters the apply that you did not vendor and
+   pin.** This is the original question, and the one that decides it. As
+   of 2026-09-09: zero `module` blocks anywhere in the org, and every
+   provider is pinned by digest in a committed `.terraform.lock.hcl`.
+2. **The credential stops being project-scoped** — a token that can
+   reach production and staging, or several accounts, makes the gap
+   between "reach" and "authority" wide enough to be worth closing.
+3. **Someone other than the plan's author can trigger an apply.** A
+   credential in a box is bounded by who can put a plan in front of it;
+   widen that and A's assumptions go with it.
+4. **A provider gains the ability to run arbitrary code you did not
+   plan** — a provisioner, an external data source, anything reaching
+   outside the declared graph.
+
+Until one of them holds, B is cost without a matching threat, and
+building it would be the kind of security work that looks diligent and
+buys nothing.
 
 ## What this document does not defend against
 

@@ -117,11 +117,115 @@ pub fn resolve_box_path(what: &str, p: &Path) -> Result<PathBuf, String> {
 /// session can follow it back — and because a hash cannot be quoted
 /// before the thing it commits to exists, the session provably came
 /// after the decision.
+/// Why a credential was refused before the box was built.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CredentialError {
+    #[error(
+        "`{0}` is not a usable environment variable name — letters, digits and \
+         underscore only, not starting with a digit. The name is interpolated into \
+         the guest command, so it is held to a shape that cannot carry anything else"
+    )]
+    BadName(String),
+    #[error(
+        "`{0}` is not set in this environment, or is empty. The value is read from \
+         here rather than passed on the command line, so there is nothing to fall \
+         back to and nothing to guess"
+    )]
+    Absent(String),
+    #[error(
+        "the grant permits no network egress, so a credential could not be used and \
+         would only be an unbounded secret sitting in a box. Name the provider's \
+         endpoint in `egress` — that declaration is what the kernel wall enforces, \
+         and it is the only thing bounding where this credential can be spent"
+    )]
+    NoEgress,
+}
+
+/// A credential to hand the box, named by the environment variable that
+/// carries it.
+///
+/// The value is read from this process's environment and **never**
+/// appears in `argv`: on a shared host `ps` is readable by other users,
+/// and a token in a command line is a token in everyone's process list.
+/// It reaches the guest over lex-os's stdin channel, which is a pipe to
+/// the subprocess and is folded into the manifest goal — so what the
+/// audit chain records is the goal's *hash*, not its text.
+#[derive(Clone)]
+pub struct Credential {
+    name: String,
+    value: String,
+}
+
+impl std::fmt::Debug for Credential {
+    /// Never print the value. A `{:?}` in a log line added months from
+    /// now should not be the thing that leaks it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Credential")
+            .field("name", &self.name)
+            .field("value", &"<redacted>")
+            .finish()
+    }
+}
+
+impl Credential {
+    /// Read `name` from this process's environment.
+    ///
+    /// `egress` is the grant's allowlist, and an empty one is refused:
+    /// the wall bounds *reach*, not authority, so the allowlist is the
+    /// only thing that says where this credential may be spent. A
+    /// credential with nowhere to go is a secret in a box for no reason.
+    pub fn from_env(name: &str, egress: &[String]) -> Result<Self, CredentialError> {
+        if !is_env_name(name) {
+            return Err(CredentialError::BadName(name.to_string()));
+        }
+        if egress.is_empty() {
+            return Err(CredentialError::NoEgress);
+        }
+        match std::env::var(name) {
+            Ok(v) if !v.is_empty() => Ok(Credential {
+                name: name.to_string(),
+                value: v,
+            }),
+            _ => Err(CredentialError::Absent(name.to_string())),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// What lex-os should send on the guest's stdin.
+    ///
+    /// One line, because the guest command reads exactly one.
+    pub fn stdin_line(&self) -> String {
+        format!("{}\n", self.value)
+    }
+}
+
+/// A name that can be interpolated into a shell command without carrying
+/// anything but itself.
+fn is_env_name(s: &str) -> bool {
+    !s.is_empty()
+        && !s.starts_with(|c: char| c.is_ascii_digit())
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 pub fn apply_argv(
     spec: &BoxSpec,
     manifest: &str,
     audit_out: Option<&str>,
     authorised_by: Option<&str>,
+) -> Vec<String> {
+    apply_argv_with_credential(spec, manifest, audit_out, authorised_by, None)
+}
+
+/// `apply_argv`, optionally handing the box a credential.
+pub fn apply_argv_with_credential(
+    spec: &BoxSpec,
+    manifest: &str,
+    audit_out: Option<&str>,
+    authorised_by: Option<&str>,
+    credential: Option<&Credential>,
 ) -> Vec<String> {
     let mut v: Vec<String> = vec![
         spec.lex_os.clone(),
@@ -154,17 +258,45 @@ pub fn apply_argv(
         v.push("--jail-gid".into());
         v.push(gid.to_string());
     }
-    // `--` then the command. `-chdir` rather than a shell, so there is
-    // no quoting layer between this argv and the process that runs.
     v.push("--".into());
-    v.extend([
-        "/usr/bin/terraform".to_string(),
-        format!("-chdir={}", spec.work_dir),
-        "apply".into(),
-        "-input=false".into(),
-        "-auto-approve".into(),
-        spec.tfplan.clone(),
-    ]);
+    match credential {
+        // `-chdir` rather than a shell, so there is no quoting layer
+        // between this argv and the process that runs.
+        None => v.extend([
+            "/usr/bin/terraform".to_string(),
+            format!("-chdir={}", spec.work_dir),
+            "apply".into(),
+            "-input=false".into(),
+            "-auto-approve".into(),
+            spec.tfplan.clone(),
+        ]),
+        // With a credential there has to be a shell, because terraform
+        // reads its token from the environment and only the process
+        // itself can put it there. The quoting layer that `-chdir`
+        // avoided is reintroduced deliberately and kept harmless: the
+        // secret never passes through it — it arrives on stdin — and
+        // every value interpolated below is already constrained
+        // (`Credential::from_env` holds the name to `[A-Za-z_][A-Za-z0-9_]*`;
+        // work_dir and tfplan are the operator's own BoxSpec, exactly as
+        // in the no-credential arm).
+        //
+        // `read -r` takes the one line and nothing else; the variable is
+        // unset before `exec` so the token is not sitting in a second
+        // name; `exec` replaces the shell so nothing outlives it.
+        Some(c) => v.extend([
+            "/bin/sh".to_string(),
+            "-c".into(),
+            format!(
+                "read -r __lex_iac_cred; export {name}=\"$__lex_iac_cred\"; \
+                 unset __lex_iac_cred; \
+                 exec /usr/bin/terraform -chdir={dir} apply -input=false \
+                 -auto-approve {plan}",
+                name = c.name(),
+                dir = spec.work_dir,
+                plan = spec.tfplan,
+            ),
+        ]),
+    }
     v
 }
 
